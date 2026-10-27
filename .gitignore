@@ -1,0 +1,14 @@
+node_modules/
+out/
+release/
+dist/
+.vite/
+*.tsbuildinfo
+*.log
+.tmp-*
+.DS_Store
+Thumbs.db
+
+# Third-party skills bundle (downloaded, not part of this project)
+linux-agent-skills-master/
+.claude/

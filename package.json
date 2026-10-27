@@ -1,0 +1,69 @@
+{
+  "name": "agentsshelper",
+  "version": "1.2.0",
+  "description": "AgentSSHelper - SSH 远程管理 / SCP 文件传输 / AI 运维桌面工具",
+  "author": "AgentSSHelper",
+  "main": "./out/main/index.js",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "prebuild": "node scripts/make-icon.mjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p src/renderer/tsconfig.json",
+    "test": "npm run build && electron out/main/smoke.js",
+    "test:env": "electron out/main/testenv.js",
+    "test:ui": "node scripts/ui-verify.mjs",
+    "test:ui:app": "node scripts/launch-ui-app.mjs",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win portable && node scripts/clean-release.mjs",
+    "clean:release": "node scripts/clean-release.mjs"
+  },
+  "build": {
+    "appId": "com.agentsshelper.app",
+    "productName": "AgentSSHelper",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/main/**/*",
+      "!out/main/smoke.js",
+      "!out/main/testenv.js",
+      "out/preload/**/*",
+      "out/renderer/**/*",
+      "build/icon.ico",
+      "resources/**/*"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "portable"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/ssh2": "^1.15.6",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "monaco-editor": "^0.57.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "ssh2": "^1.17.0"
+  }
+}
