@@ -1,0 +1,50 @@
+name: Sync Gitee -> GitHub
+
+# 定时触发：默认每小时同步一次；也可手动触发
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout GitHub repo
+        uses: actions/checkout@v4
+        with:
+          # 用 GITHUB_TOKEN 检出当前 GitHub 仓库，用于推送同步结果
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch from Gitee
+        run: |
+          # Gitee 公开仓库可通过 HTTPS 直接读取，无需凭据
+          git remote add gitee https://gitee.com/qingmingzi/agent-sshelper.git
+          git fetch gitee master
+          echo "::group::Gitee master log"
+          git log --oneline -5 gitee/master
+          echo "::endgroup::"
+
+      - name: Force sync master from Gitee
+        run: |
+          git checkout master
+          if git merge-base --is-ancestor gitee/master HEAD; then
+            echo "Gitee 无新提交，跳过"
+          else
+            echo "同步 Gitee master 到 GitHub"
+            git merge --ff-only gitee/master 2>/dev/null \
+              || git reset --hard gitee/master
+          fi
+
+      - name: Push to GitHub
+        run: |
+          git push origin master --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
