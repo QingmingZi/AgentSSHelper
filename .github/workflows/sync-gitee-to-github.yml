@@ -15,8 +15,9 @@ jobs:
       - name: Checkout GitHub repo
         uses: actions/checkout@v4
         with:
-          # 用 GITHUB_TOKEN 检出当前 GitHub 仓库，用于推送同步结果
           fetch-depth: 0
+          # 关键：将 GITHUB_TOKEN 写入 git 凭据，使后续 git push 可免密认证
+          persist-credentials: true
 
       - name: Configure git user
         run: |
@@ -32,16 +33,10 @@ jobs:
           git log --oneline -5 gitee/master
           echo "::endgroup::"
 
-      - name: Force sync master from Gitee
+      - name: Fast-forward master to Gitee
         run: |
           git checkout master
-          if git merge-base --is-ancestor gitee/master HEAD; then
-            echo "Gitee 无新提交，跳过"
-          else
-            echo "同步 Gitee master 到 GitHub"
-            git merge --ff-only gitee/master 2>/dev/null \
-              || git reset --hard gitee/master
-          fi
+          git merge --ff-only gitee/master
 
       - name: Push to GitHub
         run: |
