@@ -257,6 +257,24 @@ button {
   border-color: rgba(79, 156, 249, 0.3);
 }
 
+/* 本机 WSL 分区 */
+.sidebar-head.wsl {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.host-item.wsl .host-label em.wsl-default {
+  font-style: normal;
+  font-weight: 500;
+  font-size: 10px;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: rgba(110, 231, 183, 0.12);
+  color: var(--accent-green, #6ee7b7);
+  vertical-align: 1px;
+}
+
 .dot {
   width: 7px;
   height: 7px;

@@ -49,7 +49,28 @@ export function hostKeyFingerprint(rawKey: Buffer): string {
   return 'SHA256:' + createHash('sha256').update(rawKey).digest('base64').replace(/=+$/, '')
 }
 
-export class SshSession extends EventEmitter {
+/**
+ * 会话抽象：SSH 与本地 WSL 会话都实现该接口，
+ * 使 SessionManager / ipc / AI / transfer 能用同一套调用接入。
+ * 事件（data / error / close / shell-close / shell-exit）沿用 EventEmitter 语义。
+ */
+export interface ISshSession {
+  readonly id: string
+  readonly profile: HostProfile
+  readonly isConnected: boolean
+  connect(credentials: SessionCredentials, onTrust: (fingerprint: string, keyType: string) => void): Promise<ConnectResult>
+  startShell(options?: ShellOptions): Promise<void>
+  write(data: string): void
+  resize(cols: number, rows: number): void
+  exec(command: string, options?: ExecOptions): Promise<CommandResult>
+  sftp(): Promise<SFTPWrapper>
+  setSudoPassword(password: string | undefined): void
+  end(): void
+  on(event: string | symbol, listener: (...args: any[]) => void): this
+  emit(event: string | symbol, ...args: any[]): boolean
+}
+
+export class SshSession extends EventEmitter implements ISshSession {
   readonly id: string
   readonly profile: HostProfile
 

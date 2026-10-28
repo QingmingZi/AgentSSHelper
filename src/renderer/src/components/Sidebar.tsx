@@ -1,16 +1,20 @@
 import type { HostProfile } from '@shared/types'
 import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
-import type { SessionInfo } from '../App'
+import type { SessionInfo, WslDistroDisplay } from '../App'
 import { api } from '../api'
 
 interface SidebarProps {
   profiles: HostProfile[]
   sessions: Record<string, SessionInfo>
   activeProfileId: string | null
+  wslAvailable: boolean
+  wslDistros: WslDistroDisplay[]
   onSelect: (profileId: string) => void
   onConnect: (profile: HostProfile) => void
   onDisconnect: (profileId: string) => void
+  onWslConnect: (distro: WslDistroDisplay) => void
+  onWslDisconnect: (profileId: string) => void
   onCreate: () => void
   onEdit: (profile: HostProfile) => void
   onDelete: (profile: HostProfile) => void
@@ -20,9 +24,13 @@ export default function Sidebar({
   profiles,
   sessions,
   activeProfileId,
+  wslAvailable,
+  wslDistros,
   onSelect,
   onConnect,
   onDisconnect,
+  onWslConnect,
+  onWslDisconnect,
   onCreate,
   onEdit,
   onDelete
@@ -130,6 +138,73 @@ export default function Sidebar({
           )
         })}
       </div>
+
+      {wslAvailable && wslDistros.length > 0 && (
+        <>
+          <div className="sidebar-head wsl">
+            <span>本机 WSL</span>
+          </div>
+          <div className="host-list">
+            {wslDistros.map((distro) => {
+              const profileId = `wsl:${distro.name}`
+              const session = sessionByProfile.get(profileId)
+              const connected = session?.status.state === 'connected'
+              const connecting = session?.status.state === 'connecting'
+              return (
+                <div
+                  key={profileId}
+                  className={`host-item wsl ${activeProfileId === profileId ? 'active' : ''}`}
+                  onClick={() => {
+                    if (!connected && !connecting) onWslConnect(distro)
+                    else onSelect(profileId)
+                  }}
+                  onDoubleClick={() => {
+                    if (!connected) onWslConnect(distro)
+                  }}
+                  title={distro.state === 'Stopped' ? '该发行版当前未运行，点击启动并进入' : `WSL ${distro.version}`}
+                >
+                  <span className={`dot ${connected ? 'on' : connecting ? 'pending' : 'off'}`} />
+                  <div className="host-meta">
+                    <div className="host-label" title={distro.name}>
+                      {distro.name}
+                      {distro.isDefault ? <em className="wsl-default">默认</em> : null}
+                    </div>
+                    <div className="host-sub">
+                      WSL {distro.version} · {connected ? '已连接' : distro.state}
+                    </div>
+                  </div>
+                  <div className="host-actions">
+                    {connected ? (
+                      <button
+                        className="icon-btn"
+                        title="断开"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onWslDisconnect(profileId)
+                        }}
+                      >
+                        ⏻
+                      </button>
+                    ) : (
+                      <button
+                        className="icon-btn"
+                        title={`进入 ${distro.name}`}
+                        disabled={connecting}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onWslConnect(distro)
+                        }}
+                      >
+                        {connecting ? '…' : '▶'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
 
       <div className="sidebar-foot">
         <span className="hint">双击主机名可快速连接</span>

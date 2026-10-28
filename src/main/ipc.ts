@@ -6,6 +6,7 @@ import { IPC, type AiConfig, type HostProfile } from '@shared/types'
 import { Store, BAIDU_SEARCH_DAILY_LIMIT, BAIDU_SEARCH_MONTHLY_LIMIT } from './core/store'
 import { SessionManager } from './ssh/manager'
 import { AiOpsService } from './ai/ops'
+import { isWslAvailable, listWslDistros } from './wsl/discover'
 import {
   downloadDirectory,
   downloadFile,
@@ -118,6 +119,25 @@ export function registerIpc(store: Store, sessions: SessionManager, ai: AiOpsSer
   })
 
   ipcMain.handle('ssh:sessions', () => sessions.list())
+
+  // --------------------------------------------------------------- WSL
+
+  ipcMain.handle('wsl:list', () => {
+    const available = isWslAvailable()
+    const distros = available ? listWslDistros() : []
+    return { available, distros }
+  })
+
+  ipcMain.handle('wsl:connect', async (_e, distro: string) => {
+    return sessions.connectWsl(distro)
+  })
+
+  ipcMain.handle('wsl:disconnect', (_e, sessionId: string) => {
+    sessions.close(sessionId)
+    ai.clearHistory(sessionId)
+    ai.clearPending(sessionId)
+    return true
+  })
 
   ipcMain.handle('ssh:exec', (_e, sessionId: string, command: string, options?: { sudo?: boolean; timeout?: number }) => {
     return sessions.get(sessionId).exec(command, options ?? {})

@@ -20,6 +20,10 @@ import { registerIpc } from './ipc'
 import { IPC } from '@shared/types'
 
 let mainWindow: BrowserWindow | null = null
+/** 持有活动会话管理器，供应用退出时统一断开（含 WSL pty 进程） */
+let activeSessions: SessionManager | null = null
+/** 持有资源采样器，退出时停止定时器 */
+let activeUsageMonitor: SystemUsageMonitor | null = null
 
 /**
  * 安装应用菜单。
@@ -140,11 +144,13 @@ app.whenReady().then(() => {
   const store = new Store()
   const sessions = new SessionManager(store)
   const ai = new AiOpsService(store, sessions)
+  activeSessions = sessions
 
   registerIpc(store, sessions, ai)
 
   // 服务器实时资源占用（CPU / 内存）周期采样并广播
   const usageMonitor = new SystemUsageMonitor(sessions, 2_000)
+  activeUsageMonitor = usageMonitor
   usageMonitor.on('usage', (usage) => {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send(IPC.systemUsage, usage)
@@ -196,5 +202,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  // 断开所有会话，避免残留 SSH 进程
+  // 断开所有会话（含 WSL 交互 pty 进程），避免残留 shell/进程
+  activeUsageMonitor?.stop()
+  activeSessions?.closeAll()
 })

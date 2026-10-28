@@ -43,6 +43,15 @@ const api = {
     hostContext: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('ssh:hostContext', sessionId)
   },
 
+  wsl: {
+    list: (): Promise<{ available: boolean; distros: Array<{ name: string; isDefault: boolean; state: string; version: string }> }> =>
+      ipcRenderer.invoke('wsl:list'),
+    connect: (distro: string): Promise<{ sessionId: string; profileId: string }> =>
+      ipcRenderer.invoke('wsl:connect', distro),
+    disconnect: (sessionId: string): Promise<boolean> =>
+      ipcRenderer.invoke('wsl:disconnect', sessionId)
+  },
+
   sftp: {
     list: (sessionId: string, dir: string): Promise<unknown> =>
       ipcRenderer.invoke('sftp:list', sessionId, dir),

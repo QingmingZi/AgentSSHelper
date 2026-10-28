@@ -18,6 +18,14 @@ export interface SessionInfo {
   status: SshStatus
 }
 
+/** WSL 发行版（渲染层展示用） */
+export interface WslDistroDisplay {
+  name: string
+  isDefault: boolean
+  state: string
+  version: string
+}
+
 type TabKey = 'terminal' | 'transfer' | 'ai'
 
 interface Toast {
@@ -58,6 +66,8 @@ function UsageBar({
 
 export default function App(): ReactElement {
   const [profiles, setProfiles] = useState<HostProfile[]>([])
+  const [wslDistros, setWslDistros] = useState<WslDistroDisplay[]>([])
+  const [wslAvailable, setWslAvailable] = useState(false)
   const [sessions, setSessions] = useState<Record<string, SessionInfo>>({})
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null)
   const [tab, setTab] = useState<TabKey>('terminal')
@@ -90,6 +100,22 @@ export default function App(): ReactElement {
   useEffect(() => {
     void refreshProfiles()
   }, [refreshProfiles])
+
+  // 加载本机 WSL 发行版
+  useEffect(() => {
+    let alive = true
+    void api.wsl
+      .list()
+      .then((res) => {
+        if (!alive) return
+        setWslAvailable(res.available)
+        setWslDistros(res.distros ?? [])
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // 主进程事件订阅
   useEffect(() => {
@@ -235,7 +261,11 @@ export default function App(): ReactElement {
     async (profileId: string) => {
       const session = sessionForProfile(profileId)
       if (!session) return
-      await api.ssh.disconnect(session.sessionId)
+      if (profileId.startsWith('wsl:')) {
+        await api.wsl.disconnect(session.sessionId)
+      } else {
+        await api.ssh.disconnect(session.sessionId)
+      }
       setSessions((prev) => {
         const next = { ...prev }
         delete next[session.sessionId]
@@ -245,6 +275,42 @@ export default function App(): ReactElement {
       pushToast('info', '已断开连接')
     },
     [pushToast, sessionForProfile]
+  )
+
+  const handleWslConnect = useCallback(
+    async (distro: WslDistroDisplay) => {
+      const profileId = `wsl:${distro.name}`
+      const existing = sessionForProfile(profileId)
+      if (existing && existing.status.state === 'connected') {
+        setActiveProfileId(profileId)
+        return
+      }
+      try {
+        const result = await api.wsl.connect(distro.name)
+        setSessions((prev) => ({
+          ...prev,
+          [result.sessionId]: {
+            sessionId: result.sessionId,
+            profileId,
+            label: `WSL · ${distro.name}`,
+            host: `wsl@${distro.name}`,
+            status: {
+              sessionId: result.sessionId,
+              profileId,
+              state: 'connected',
+              message: '已连接'
+            }
+          }
+        }))
+        setActiveProfileId(profileId)
+        setTab('terminal')
+        pushToast('success', `已进入 WSL 发行版 ${distro.name}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        pushToast('error', `WSL 连接失败：${message}`)
+      }
+    },
+    [sessionForProfile, pushToast]
   )
 
   const handleSaveProfile = useCallback(
@@ -341,12 +407,16 @@ export default function App(): ReactElement {
           profiles={profiles}
           sessions={sessions}
           activeProfileId={activeProfileId}
+          wslAvailable={wslAvailable}
+          wslDistros={wslDistros}
           onSelect={(id) => {
             setActiveProfileId(id)
             setTab('terminal')
           }}
           onConnect={handleConnect}
           onDisconnect={handleDisconnect}
+          onWslConnect={handleWslConnect}
+          onWslDisconnect={handleDisconnect}
           onCreate={() => setHostDialog({ mode: 'create' })}
           onEdit={(profile) => setHostDialog({ mode: 'edit', profile })}
           onDelete={handleDeleteProfile}

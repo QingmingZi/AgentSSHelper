@@ -21,6 +21,8 @@ import {
   statRemote
 } from '../main/ssh/transfer'
 import { startFakeSshServer } from './fakeSshServer'
+import { listWslDistros, isWslAvailable } from '../main/wsl/discover'
+import { WslSession } from '../main/wsl/session'
 import type { AiMetrics } from '../shared/types'
 
 interface TestResult {
@@ -363,7 +365,10 @@ async function run(): Promise<number> {
     assert('df -h 判定为 safe', classifyCommand('df -h') === 'safe')
     assert('systemctl status 判定为 safe', classifyCommand('systemctl status nginx') === 'safe')
     assert('rm 判定为 delete', classifyCommand('rm -rf /data') === 'delete')
-    assert('sudo rm 判定为 delete', classifyCommand('sudo rm -rf /data') === 'delete')
+    // sudo 命中危险模式短路为 risky：即使其内部是删除类命令，
+    // 也必须永远要求人工确认，防止「修改删除免确认」开关把 sudo 命令自动执行掉。
+    assert('sudo rm 短路为 risky（永不自动执行）', classifyCommand('sudo rm -rf /data') === 'risky')
+    assert('sudo 单独也降级为 risky', classifyCommand('sudo ls /var/log') === 'risky')
     assert('docker rm 判定为 delete', classifyCommand('docker rm -f web') === 'delete')
     assert('chmod 判定为 modify', classifyCommand('chmod 644 /etc/nginx.conf') === 'modify')
     assert('systemctl restart 判定为 modify', classifyCommand('systemctl restart nginx') === 'modify')
@@ -890,6 +895,45 @@ async function run(): Promise<number> {
     )
 
     mockServer.close()
+
+    // ----------------------------------------------------------- WSL 支持
+    if (process.platform === 'win32') {
+      const wslAvail = isWslAvailable()
+      assert('WSL 环境可探测', typeof wslAvail === 'boolean')
+      const distros = listWslDistros()
+      if (wslAvail && distros.length > 0) {
+        assert(
+          'WSL 发行版解析正确',
+          distros.every((d) => d.name && d.version) && distros.some((d) => d.isDefault),
+          JSON.stringify(distros.slice(0, 3))
+        )
+        const wsl = new WslSession('wsl-smoke', distros[0].name)
+        await wsl.connect({}, () => undefined)
+        const wslExec = await wsl.exec('echo WSL_SMOKE_OK && uname -s', { timeout: 30_000 })
+        assert(
+          'WSL exec 执行正常',
+          wslExec.code === 0 && /WSL_SMOKE_OK/.test(wslExec.stdout),
+          `code=${wslExec.code}, out=${wslExec.stdout.trim().slice(0, 60)}`
+        )
+        // 通过 \\wsl$ 列出根目录
+        const sftp = await wsl.sftp()
+        const list = await new Promise<unknown[]>((resolve, reject) => {
+          const wrapper = sftp as unknown as { readdir: (d: string, cb: (e: Error | undefined, l?: unknown[]) => void) => void }
+          wrapper.readdir('/', (err, l) => (err ? reject(err) : resolve(l ?? [])))
+        })
+        assert('WSL 文件系统可列出（\\\\wsl$）', list.length > 0, `条目=${list.length}`)
+        wsl.end()
+
+        // 通过 SessionManager 接入：connectWsl 产生可用的会话
+        const viaManager = await sessions.connectWsl(distros[0].name)
+        assert('WSL 会话经 manager 建立', Boolean(viaManager.sessionId && sessions.has(viaManager.sessionId)))
+        sessions.close(viaManager.sessionId)
+      } else {
+        check('本机无 WSL 发行版，跳过 WSL 用例', true, `available=${wslAvail}`)
+      }
+    } else {
+      check('非 Windows 平台，跳过 WSL 用例', true)
+    }
   } catch (err) {
     check('测试执行未抛出异常', false, err instanceof Error ? err.stack : String(err))
   } finally {

@@ -51,6 +51,14 @@ export interface SshHelperApi {
     readText(sessionId: string, target: string): Promise<{ content: string; size: number }>
     writeText(sessionId: string, target: string, content: string): Promise<{ ok: boolean }>
   }
+  wsl: {
+    list(): Promise<{
+      available: boolean
+      distros: Array<{ name: string; isDefault: boolean; state: string; version: string }>
+    }>
+    connect(distro: string): Promise<{ sessionId: string; profileId: string }>
+    disconnect(sessionId: string): Promise<boolean>
+  }
   transfer: {
     run(options: {
       sessionId: string

@@ -1,8 +1,14 @@
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import type { HostProfile, SshStatus } from '@shared/types'
-import { SshSession, type ConnectResult, type SessionCredentials } from './connection'
+import {
+  SshSession,
+  type ConnectResult,
+  type ISshSession,
+  type SessionCredentials
+} from './connection'
 import type { Store } from '../core/store'
+import { WslSession } from '../wsl/session'
 
 export interface ConnectOutcome {
   sessionId: string
@@ -17,7 +23,7 @@ export interface ConnectOutcome {
  * 负责会话生命周期、凭据解密、主机密钥指纹持久化，以及向渲染层广播状态事件。
  */
 export class SessionManager extends EventEmitter {
-  private readonly sessions = new Map<string, SshSession>()
+  private readonly sessions = new Map<string, ISshSession>()
   private readonly store: Store
 
   constructor(store: Store) {
@@ -30,15 +36,21 @@ export class SessionManager extends EventEmitter {
   }
 
   list(): Array<{ sessionId: string; profileId: string; label: string; host: string }> {
-    return [...this.sessions.values()].map((s) => ({
-      sessionId: s.id,
-      profileId: s.profile.id,
-      label: s.profile.label,
-      host: `${s.profile.username}@${s.profile.host}:${s.profile.port}`
-    }))
+    return [...this.sessions.values()].map((s) => {
+      const p = s.profile
+      const host = p.id.startsWith('wsl:')
+        ? `wsl@${p.host}` // WSL 会话不显示端口
+        : `${p.username}@${p.host}:${p.port}`
+      return {
+        sessionId: s.id,
+        profileId: p.id,
+        label: p.label,
+        host
+      }
+    })
   }
 
-  get(sessionId: string): SshSession {
+  get(sessionId: string): ISshSession {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error(`会话不存在或已关闭: ${sessionId}`)
     return session
@@ -82,24 +94,8 @@ export class SessionManager extends EventEmitter {
     }
 
     this.sessions.set(sessionId, session)
+    this.bindSession(session, profile.id)
     this.emitStatus(sessionId, profile.id, 'connecting', '正在连接...')
-
-    session.on('data', (chunk: string) => this.emit('data', { sessionId, chunk }))
-    session.on('error', (err: Error) => {
-      this.emitStatus(sessionId, profile.id, 'error', err.message)
-      this.emit('session-error', { sessionId, message: err.message })
-    })
-    session.on('close', () => {
-      this.sessions.delete(sessionId)
-      this.emitStatus(sessionId, profile.id, 'closed')
-      this.emit('closed', { sessionId })
-    })
-    session.on('shell-close', (info: { code: number | null }) => {
-      this.emit('shell-close', { sessionId, ...info })
-    })
-    session.on('shell-exit', (info: { code: number | null }) => {
-      this.emit('shell-exit', { sessionId, ...info })
-    })
 
     try {
       const result: ConnectResult = await session.connect(
@@ -121,6 +117,52 @@ export class SessionManager extends EventEmitter {
       this.emitStatus(sessionId, profile.id, 'error', message)
       throw err
     }
+  }
+
+  /**
+   * 连接一个本机 WSL 发行版。与 SSH 主机会话统一纳入会话管理，
+   * 使终端 / 文件传输 / AI 运维可像对待远程主机一样使用。
+   */
+  async connectWsl(distro: string): Promise<{ sessionId: string; profileId: string }> {
+    const sessionId = randomUUID()
+    const session = new WslSession(sessionId, distro)
+    const profileId = session.profile.id
+
+    this.sessions.set(sessionId, session)
+    this.bindSession(session, profileId)
+    this.emitStatus(sessionId, profileId, 'connecting', '正在启动 WSL...')
+
+    try {
+      await session.connect({}, () => {})
+      this.emitStatus(sessionId, profileId, 'connected', '已连接')
+      return { sessionId, profileId }
+    } catch (err) {
+      this.sessions.delete(sessionId)
+      const message = err instanceof Error ? err.message : String(err)
+      this.emitStatus(sessionId, profileId, 'error', message)
+      throw err
+    }
+  }
+
+  /** 把会话的事件转发到 manager 的统一事件，供主进程广播到渲染层 */
+  private bindSession(session: ISshSession, profileId: string): void {
+    const sessionId = session.id
+    session.on('data', (chunk: string) => this.emit('data', { sessionId, chunk }))
+    session.on('error', (err: Error) => {
+      this.emitStatus(sessionId, profileId, 'error', err.message)
+      this.emit('session-error', { sessionId, message: err.message })
+    })
+    session.on('close', () => {
+      this.sessions.delete(sessionId)
+      this.emitStatus(sessionId, profileId, 'closed')
+      this.emit('closed', { sessionId })
+    })
+    session.on('shell-close', (info: { code: number | null }) => {
+      this.emit('shell-close', { sessionId, ...info })
+    })
+    session.on('shell-exit', (info: { code: number | null }) => {
+      this.emit('shell-exit', { sessionId, ...info })
+    })
   }
 
   close(sessionId: string): void {
