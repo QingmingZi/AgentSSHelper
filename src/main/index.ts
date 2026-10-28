@@ -92,7 +92,9 @@ function createWindow(): void {
     title: 'AgentSSHelper',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      // 开启 Electron 沙箱：preload 仅使用 electron 模块，沙箱下完全可用。
+      // 关闭沙箱会增加渲染进程被攻破后的本地影响面。
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -101,9 +103,28 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => mainWindow?.show())
 
   const webContents = mainWindow.webContents
+  // 仅允许用系统浏览器打开 http/https/mailto 链接，其余协议一律拦截，
+  // 防止恶意链接使用 smb://、file://、自定义协议触发系统操作或泄露凭据。
+  const SAFE_EXTERNAL_SCHEMES = new Set(['http:', 'https:', 'mailto:'])
   webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    try {
+      const parsed = new URL(url)
+      if (!SAFE_EXTERNAL_SCHEMES.has(parsed.protocol)) {
+        console.warn(`[index] 拦截非白名单协议的外部链接：${parsed.protocol}`)
+        return { action: 'deny' }
+      }
+      void shell.openExternal(url)
+    } catch {
+      // URL 解析失败也拦截
+    }
     return { action: 'deny' }
+  })
+
+  // 拦截窗口自身导航到任意远程页面，避免下载 XSS/钓鱼。
+  webContents.on('will-navigate', (event, url) => {
+    const allowed =
+      process.env.ELECTRON_RENDERER_URL != null && url.startsWith(process.env.ELECTRON_RENDERER_URL)
+    if (!allowed) event.preventDefault()
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {

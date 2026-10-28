@@ -421,6 +421,13 @@ export default function SettingsDialog({ onClose, onSaved }: SettingsDialogProps
             </li>
           </ul>
         )}
+        {info?.keychain.includes('降级') && (
+          <div className="security-warning" role="alert">
+            ⚠ 安全提示：当前环境缺少系统密钥库（Windows DPAPI / macOS Keychain / Linux keyring），
+            API Key 与 SSH 口令使用本地派生密钥加密，强度弱于系统密钥库。请优先在装有系统密钥环的桌面环境使用。
+            <span className="detail">{info.keychain}</span>
+          </div>
+        )}
 
         <div className="modal-actions">
           {saved && <span className="success-text">已保存</span>}

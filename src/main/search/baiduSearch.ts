@@ -121,10 +121,16 @@ export async function baiduWebSearch(
 
   if (!response.ok) {
     // 限流 / 认证失败 / 参数错误：静默降级，不阻塞 AI 回答
+    // 错误响应体可能含攻击者控制的文本或回显的 Key，落盘前脱敏、限长、剔除控制字符。
     const detail = await response.text().catch(() => '')
-    console.warn(
-      `[baiduSearch] 搜索失败 HTTP ${response.status}：${detail.slice(0, 200)}`
-    )
+    const safeDetail = detail
+      .replace(/\u001B(?:\[[0-?]*[ -/]*[@-~])/g, '')
+      .replace(/[\u0000-\u001f\u007f\r]/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\b(sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._-]{8,})\b/gi, '[REDACTED]')
+      .trim()
+      .slice(0, 200)
+    console.warn(`[baiduSearch] 搜索失败 HTTP ${response.status}：${safeDetail}`)
     return null
   }
 

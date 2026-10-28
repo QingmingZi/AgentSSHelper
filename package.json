@@ -1,6 +1,6 @@
 {
   "name": "agentsshelper",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "AgentSSHelper - SSH 远程管理 / SCP 文件传输 / AI 运维桌面工具",
   "author": "AgentSSHelper",
   "main": "./out/main/index.js",
@@ -65,5 +65,8 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "ssh2": "^1.17.0"
+  },
+  "overrides": {
+    "dompurify": "3.4.17"
   }
 }

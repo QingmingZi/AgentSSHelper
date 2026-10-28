@@ -301,7 +301,17 @@ export function registerIpc(store: Store, sessions: SessionManager, ai: AiOpsSer
    */
   ipcMain.handle('ai:listModels', async (_e, baseUrl?: string, apiKey?: string) => {
     const stored = store.getAiConfig()
-    const config = { ...stored, baseUrl: (baseUrl ?? '').trim() || stored.baseUrl }
+    const incoming = (baseUrl ?? '').trim()
+    // 渲染层传入的 baseUrl 视为不可信输入：严格校验，仅允许 http/https，
+    // 并阻止指向云元数据(169.254.x.x)、局域网等内网目标，防 SSRF / Key 外送。
+    const resolved = incoming || stored.baseUrl
+    try {
+      const { assertSafeBaseUrl } = await import('./ai/client')
+      assertSafeBaseUrl(resolved, { allowLoopback: true, label: 'AI 接口地址' })
+    } catch (err) {
+      return { ok: false, models: [], message: err instanceof Error ? err.message : String(err) }
+    }
+    const config = { ...stored, baseUrl: resolved }
     const typedKey = (apiKey ?? '').trim()
     const key = typedKey || ((await store.getAiApiKey()) ?? '')
     const { AiClient } = await import('./ai/client')
@@ -442,14 +452,29 @@ export function registerIpc(store: Store, sessions: SessionManager, ai: AiOpsSer
   })
 
   ipcMain.handle('system:openPath', async (_e, target: string) => {
-    if (!target) return false
-    const error = await shell.openPath(target)
+    if (!target || typeof target !== 'string') return false
+    const resolved = path.resolve(target)
+    // 拒绝在 Windows 上会执行代码的扩展名，防止渲染层被诱导打开恶意程序
+    if (/\.(exe|bat|cmd|com|msi|ps1|vbs|js|jse|wsh|scr|hta|lnk)$/i.test(resolved)) {
+      throw new Error('出于安全考虑，不能直接打开可执行或脚本文件')
+    }
+    let stat
+    try {
+      stat = fs.statSync(resolved)
+    } catch {
+      throw new Error('路径不存在')
+    }
+    if (!stat.isDirectory() && !stat.isFile()) throw new Error('无法打开该路径')
+    const error = await shell.openPath(resolved)
     if (error) throw new Error(error)
     return true
   })
 
   ipcMain.handle('system:revealPath', (_e, target: string) => {
-    shell.showItemInFolder(target)
+    if (!target || typeof target !== 'string') return true
+    const resolved = path.resolve(target)
+    if (!fs.existsSync(resolved)) return true
+    shell.showItemInFolder(resolved)
     return true
   })
 

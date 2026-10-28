@@ -46,6 +46,61 @@ export function normalizeBaseUrl(baseUrl: string): string {
 }
 
 /**
+ * 校验 AI 服务端 baseUrl，防止 SSRF / 任意主机外送 API Key。
+ *
+ * 约束：
+ *  - 必须是合法 URL，且协议仅限 http/https（拒绝 file://、data://、ftp:// 等，
+ *    否则可能被用于读取本地文件）；
+ *  - 解析出的主机若为回环 / 链路本地 / 保留地址（如 169.254.169.254 云元数据、
+ *    127.0.0.1、::1、fe80::），仅当显式传入 allowLoopback 时才允许。
+ *
+ * @returns 校验通过返回规范化前的原始 baseUrl；失败抛 Error。
+ */
+export function assertSafeBaseUrl(baseUrl: string, opts: { allowLoopback?: boolean; label?: string } = {}): string {
+  const raw = (baseUrl ?? '').trim()
+  if (!raw) throw new Error(`${opts.label ?? '接口地址'}不能为空`)
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    throw new Error(`${opts.label ?? '接口地址'}不是合法的 URL`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${opts.label ?? '接口地址'}仅支持 http/https 协议，不允许 ${parsed.protocol}//`)
+  }
+  const host = parsed.hostname.toLowerCase()
+  // 判断是否回环/链路本地/保留地址（含 IPv6 压缩形式与 127.0.0.0/8）
+  const isLoopback =
+    host === 'localhost' ||
+    host === '::1' ||
+    /^127\.\d+\.\d+\.\d+$/.test(host) ||
+    /^0\.0\.0\.0$/.test(host)
+  const isLinkLocal =
+    /^fe80:/i.test(host) ||
+    /^169\.254\.\d+\.\d+$/.test(host) ||
+    /^192\.168\.\d+\.\d+$/.test(host) ||
+    /^(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/.test(host)
+  if ((isLoopback || isLinkLocal) && !opts.allowLoopback) {
+    throw new Error(
+      `${opts.label ?? '接口地址'}指向 ${host}（内网/回环地址）。为避免 SSRF 与 API Key 外送至云元数据或内网主机，已拒绝。若确为内网自建服务，请在设置中显式允许并确认。`
+    )
+  }
+  return raw
+}
+
+/** 错误响应体脱敏：剔除控制/ANSI 字符、压缩空白、截断、并隐藏疑似密钥文本 */
+export function sanitizeErrorBody(text: string, maxLength = 300): string {
+  if (!text) return ''
+  const cleaned = text
+    .replace(/\u001B(?:\[[0-?]*[ -/]*[@-~]|[()][0-9;]*|\][^\u0007]*\u0007?)/g, '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\r]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\b(sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._-]{8,})\b/gi, '[REDACTED]')
+    .trim()
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength)}…` : cleaned
+}
+
+/**
  * 从服务端的 /models 响应里提取模型 ID。
  * 兼容 OpenAI 标准的 `{ data: [{ id }] }`，
  * 也兼容 `{ models: [...] }`、裸数组，以及元素直接是字符串的写法。
@@ -85,7 +140,18 @@ export class AiClient {
   constructor(
     private readonly config: AiConfig,
     private readonly apiKey: string
-  ) {}
+  ) {
+    // 构造时即校验接口地址：拒绝内网/回环/云元数据等危险目标，防 SSRF 与 Key 外送。
+    // 回环地址（localhost/127.0.0.1）允许，便于本地自建 LLM（如 Ollama）。
+    try {
+      assertSafeBaseUrl(config.baseUrl, { allowLoopback: true, label: 'AI 接口地址' })
+    } catch (err) {
+      // 构造期不失败，由各出站方法在真正发起前校验；这里只提前暴露明显错误。
+      this.urlError = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  private readonly urlError: string = ''
 
   private get endpoint(): string {
     const base = normalizeBaseUrl(this.config.baseUrl)
@@ -121,13 +187,14 @@ export class AiClient {
    * 失败不抛异常，返回 ok=false 与错误描述，由界面提示用户手填。
    */
   async listModels(): Promise<{ ok: boolean; models: string[]; message: string }> {
+    if (this.urlError) return { ok: false, models: [], message: this.urlError }
     let lastError = ''
     for (const url of this.modelEndpoints()) {
       try {
         const response = await fetch(url, { method: 'GET', headers: this.buildHeaders() })
         const text = await response.text()
         if (!response.ok) {
-          lastError = `HTTP ${response.status} ${response.statusText} ${text.slice(0, 200)}`.trim()
+          lastError = `HTTP ${response.status} ${response.statusText} ${sanitizeErrorBody(text)}`.trim()
           continue
         }
         let payload: unknown
@@ -152,6 +219,7 @@ export class AiClient {
 
   /** 发送一次非流式请求（用于连通性测试） */
   async ping(): Promise<{ ok: boolean; message: string; latencyMs: number }> {
+    if (this.urlError) return { ok: false, message: this.urlError, latencyMs: 0 }
     const started = Date.now()
     try {
       const response = await fetch(this.endpoint, {
@@ -167,13 +235,13 @@ export class AiClient {
       const latencyMs = Date.now() - started
       const text = await response.text()
       if (!response.ok) {
-        return { ok: false, message: `HTTP ${response.status} ${response.statusText} ${text.slice(0, 300)}`, latencyMs }
+        return { ok: false, message: `HTTP ${response.status} ${response.statusText} ${sanitizeErrorBody(text)}`, latencyMs }
       }
       return { ok: true, message: '连接成功', latencyMs }
     } catch (err) {
       return {
         ok: false,
-        message: err instanceof Error ? err.message : String(err),
+        message: err instanceof Error ? sanitizeErrorBody(err.message) : String(err),
         latencyMs: Date.now() - started
       }
     }
@@ -181,6 +249,10 @@ export class AiClient {
 
   /** 流式对话，同时统计首字延迟、输出速度与上下文用量 */
   async chat(messages: ChatMessage[], handlers: AiStreamHandlers, signal?: AbortSignal): Promise<void> {
+    if (this.urlError) {
+      handlers.onError(new Error(this.urlError))
+      return
+    }
     const startedAt = Date.now()
     let full = ''
     let firstTokenAt: number | null = null
@@ -239,12 +311,12 @@ export class AiClient {
         if (/stream_options|unknown|unrecognized|unsupported|invalid/i.test(text)) {
           response = await send(false)
         } else {
-          throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`)
+          throw new Error(`HTTP ${response.status} ${response.statusText}: ${sanitizeErrorBody(text)}`)
         }
       }
       if (!response.ok) {
         const text = await response.text()
-        throw new Error(`HTTP ${response.status} ${response.statusText}: ${text.slice(0, 500)}`)
+        throw new Error(`HTTP ${response.status} ${response.statusText}: ${sanitizeErrorBody(text)}`)
       }
       if (!response.body) throw new Error('响应没有可读流')
 
@@ -278,7 +350,7 @@ export class AiClient {
           } catch {
             continue
           }
-          if (parsed.error?.message) throw new Error(parsed.error.message)
+          if (parsed.error?.message) throw new Error(sanitizeErrorBody(parsed.error.message))
           if (parsed.usage) {
             usage = {
               promptTokens: parsed.usage.prompt_tokens ?? 0,

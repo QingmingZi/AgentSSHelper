@@ -365,6 +365,11 @@ export async function downloadDirectory(
   const entries = await listRemoteDir(sftp, remoteDir)
   for (const entry of entries) {
     if (signal?.aborted) throw new Error('传输已取消')
+    // 防御目录穿越：拒绝带路径分隔符或 .. 的远端文件名，
+    // 否则恶意文件系统可能把本地路径写出 localDir 之外。
+    if (isUnsafeRemoteName(entry.name)) {
+      throw new Error(`拒绝下载含不安全路径的文件名：${entry.name}`)
+    }
     const localChild = path.join(localDir, entry.name)
     if (entry.type === 'directory') {
       await downloadDirectory(sftp, entry.path, localChild, taskId, sessionId, onProgress, signal, overwrite)
@@ -375,13 +380,19 @@ export async function downloadDirectory(
   }
 }
 
+/** 远端文件名是否含不安全路径成分（目录穿越） */
+function isUnsafeRemoteName(name: string): boolean {
+  return /[\\/]/.test(name) || name === '..' || name === '.'
+}
+
 export interface NativeScpOptions {
   host: string
   port: number
   username: string
   privateKeyPath?: string
   passphrase?: string
-  strictHostKeyChecking?: 'yes' | 'accept-new' | 'no'
+  /** 主机密钥校验策略：可选 yes / accept-new；禁止 'no'（会完全跳过校验，易受中间人） */
+  strictHostKeyChecking?: 'yes' | 'accept-new'
 }
 
 /**
