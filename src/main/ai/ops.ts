@@ -19,7 +19,6 @@ import { baiduWebSearch, shouldSearch } from '../search/baiduSearch'
  * systemctl status nginx
  * :::
  */
-const COMMAND_BLOCK = /:::command\s*\n?([\s\S]*?)\n?\s*:::/g
 
 /** 只读命令白名单（可自动执行） */
 const SAFE_COMMANDS = [
@@ -518,14 +517,57 @@ export function canAutoApprove(risk: CommandRisk, config: AiConfig): boolean {
   return false
 }
 
-/** 从 AI 回复中提取命令提案 */
+/** 命令块的各种结束标记：标准 `:::`，或模型偶尔自学的 EOF / EOT */
+
+/**
+ * 提取 AI 提出的命令提案块。
+ *
+ * 兼容两种结尾：
+ *  - 标准协议：`:::command` … `:::`；
+ *  - 模型误用 heredoc 风格：`:::command` … 独立一行 `EOF` / `EOT`。
+ * 只接受模型输出里的独立命令块；远端回灌内容在进入模型前已被 sanitizeUntrusted
+ * 剥离了这些标记，因此这里不会误提取到不可信来源的命令。
+ */
 export function extractCommands(text: string): string[] {
   const out: string[] = []
-  let match: RegExpExecArray | null
-  COMMAND_BLOCK.lastIndex = 0
-  while ((match = COMMAND_BLOCK.exec(text)) !== null) {
-    const cmd = match[1].trim()
-    if (cmd) out.push(cmd)
+  if (!text) return out
+
+  const source = text
+  let pos = 0
+  while (true) {
+    const m = /:::command\b[ \t]*/i.exec(source.slice(pos))
+    if (!m) break
+    const openEnd = pos + m.index + m[0].length
+    const rest = source.slice(openEnd)
+
+    // 寻找命令内容结束位置，取三种候选的最靠前者：
+    // 1) 标准闭合 ::: ；2) 独立一行或行尾的 EOF/EOT；3) 若在多行块内，到该行结尾。
+    let end = rest.length
+    const closeIdx = rest.indexOf(':::')
+    if (closeIdx >= 0) end = closeIdx
+    const eofM = /(?:\n\s*|\s)(?:EOF|EOT)(?=\s*(?:\n|$))/i.exec(rest)
+    if (eofM) {
+      const eofEnd = eofM.index + eofM[0].length
+      if (eofEnd < end) {
+        // 命令内容到 EOF 标记前为止
+        end = eofM.index + (rest[eofM.index] === '\n' ? 1 : 0)
+        // 去掉命令末尾与 EOF 之间可能的空格
+        while (end > 0 && rest[end - 1] === ' ') end--
+      }
+    }
+    // 若没有闭合标记且在单行内（只有 :::command 那一行），取到行尾
+    if (closeIdx < 0 && !eofM) {
+      const nl = rest.indexOf('\n')
+      if (nl >= 0) end = Math.min(end, nl)
+    }
+
+    const raw = rest.slice(0, end).trim()
+    if (raw) out.push(raw)
+
+    // 推进：越过已消费的结束标记
+    const consumed = Math.min(end + 3, rest.length)
+    pos = openEnd + (consumed < rest.length ? consumed : rest.length)
+    if (pos >= source.length) break
   }
   return out
 }
@@ -534,11 +576,12 @@ export function extractCommands(text: string): string[] {
  * 清洗不可信文本（远端命令输出、百度搜索摘要等），防止提示注入。
  *
  * 攻击面：远端任何含 `:::command` 字样的文件（web 日志、上传目录）若被模型引用回显，
- * 会被 COMMAND_BLOCK 协议当作「模型提出的命令」而提交执行。
+ * 会被命令提取协议当作「模型提出的命令」而提交执行。
  * 因此在把不可信内容注入上下文前：
  *  1. 剥掉 `:::command` / `:::` 协议标记本身；
- *  2. 剔除 ANSI 转义与控制字符（防终端控制符）；
- *  3. 压缩多余空白并限长。
+ *  2. 剥掉独立成行的 heredoc 结束标记 EOF / EOT（与 extractCommands 识别的结尾对称）；
+ *  3. 剔除 ANSI 转义与控制字符（防终端控制符）；
+ *  4. 压缩多余空白并限长。
  */
 export function sanitizeUntrusted(text: string, maxLength = 4000): string {
   if (!text) return text
@@ -546,6 +589,8 @@ export function sanitizeUntrusted(text: string, maxLength = 4000): string {
     // 移除命令块协议标记及围栏，避免被误解析成待执行命令
     .replace(/:::\s*command\s*/gi, '')
     .replace(/:::\s*/g, '')
+    // 移除独立成行的 heredoc 结束标记 EOF / EOT，防止它们被当作命令块闭合标记
+    .replace(/^[ \t]*(?:EOF|EOT)[ \t]*$/gim, '')
     // 剔除 ANSI 转义序列
     .replace(/\u001B(?:\[[0-?]*[ -/]*[@-~]|[()][0-9;]*|\][^\u0007]*\u0007?)/g, '')
     // 剔除控制字符（保留 \n 用于多行输出展示）
