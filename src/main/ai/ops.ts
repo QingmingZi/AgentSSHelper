@@ -608,7 +608,7 @@ export function sanitizeUntrusted(text: string, maxLength = 4000): string {
  * 以及 Windows/WSL 本机用户数据（浏览器凭据库、Cookie、聊天/邮件本地库、应用数据）。
  */
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
-  /\/(etc\/)?s?hadow\b/i, // /etc/shadow、/etc/gshadow
+  /\/(etc\/)(s?hadow|gshadow|shadow-\d+|fbtab)\b/i, // /etc/shadow、/etc/gshadow、/etc/fbtab 等口令哈希文件
   // dot 目录/文件（.env、.ssh、.aws、.config、.gnupg、.docker、.kube 等）。
   // 注意用 [\w.-]* 而非 [\w-]*：\w 不含点号，否则所有「点目录」都会漏检。
   /(^|\/)\.[\w.-]*(ssh|gnupg|aws|docker|kube|config|env)/,
