@@ -10,6 +10,7 @@ import { SystemUsageMonitor } from '../main/ssh/monitor'
 import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger } from '../main/ai/ops'
 import { taintRequiresConfirmation, hasCommandBlockRemnants, isCleanForLlm } from '../main/ai/taint'
 import { loadAttackRules, matchAttackRules, isAttackRulesReady } from '../main/ai/attackRules'
+import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from '../main/ai/tools'
 import { AiClient } from '../main/ai/client'
 import { shouldSearch, extractSearchKeyword, extractWebResults } from '../main/search/baiduSearch'
 import {
@@ -642,6 +643,32 @@ async function run(): Promise<number> {
     const credAttacks = matchAttackRules('cat /etc/shadow')
     assert('ATT&CK-口令读取命中凭据', credAttacks.some((a) => a.techniques.includes('T1003.008') || a.techniques.includes('T1552.001')), JSON.stringify(credAttacks))
     assert('ATT&CK-普通只读不误报', matchAttackRules('df -h').length === 0, JSON.stringify(matchAttackRules('df -h')))
+
+    // ---------------------------------------------- 阶段4：只读工具面（双通道分离）
+    const okExec = async (cmd: string, _opts?: { timeout?: number }): Promise<{ stdout: string; stderr: string; code: number }> => ({
+      stdout: `OUT:${cmd}`,
+      stderr: '',
+      code: 0
+    })
+    assert('工具-主机信息只读', listReadOnlyTools().length >= 7, `tools=${listReadOnlyTools().length}`)
+    assert('工具-os-release 执行成功', (await runReadOnlyTool('os-release', okExec as never))?.ok === true)
+    assert('工具-已知工具执行', (await runReadOnlyTool('memory', okExec as never))?.ok === true)
+    assert('工具-未知工具拒绝', (await runReadOnlyTool('rm -rf x', okExec as never))?.ok === false)
+    const notFound = await runReadOnlyTool('nonexistent-tool', okExec as never)
+    assert('工具-不存在返回错误', !!(notFound && notFound.ok === false), JSON.stringify(notFound))
+    // read_file：敏感路径守卫必须拦截
+    const readResult = await executeReadFile('/etc/shadow', {
+      readFile: async () => 'SHADOW_CONTENT',
+      stat: async () => ({ size: 100 }),
+      isSensitive: (p) => /etc\/shadow/.test(p)
+    })
+    assert('工具-read_file-敏感路径拒绝', readResult.ok === false && /敏感/.test(readResult.error ?? ''), JSON.stringify(readResult))
+    const safeRead = await executeReadFile('/etc/os-release', {
+      readFile: async () => 'PRETTY_NAME=Ubuntu',
+      stat: async () => ({ size: 50 }),
+      isSensitive: (p) => /etc\/shadow/.test(p)
+    })
+    assert('工具-read_file-普通文件放行', safeRead.ok === true && (safeRead.output ?? '').includes('PRETTY_NAME'), JSON.stringify(safeRead))
 
     // --------------------------------------------------- 命令提案解析
     const reply = `先看下磁盘。\n:::command\ndf -h\n:::\n再看看内存。\n:::command\nfree -m\n:::`

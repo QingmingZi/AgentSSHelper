@@ -438,6 +438,12 @@ export function registerIpc(store: Store, sessions: SessionManager, ai: AiOpsSer
     return ai.stopCommand(commandId)
   })
 
+  // 只读工具面（双通道中的只读/自动通道）：执行固定只读诊断工具或读取文件
+  ipcMain.handle('ai:runReadOnlyTool', async (_e, sessionId: string, toolName: string, args?: Record<string, string>) => {
+    return await ai.runReadOnlyToolForSession(sessionId, toolName, args)
+  })
+  ipcMain.handle('ai:listReadOnlyTools', () => ai.listReadOnlyTools())
+
   // ------------------------------------------------------------ 系统
 
   // 导出对话日志：渲染层拼好内容，主进程弹保存框落盘
