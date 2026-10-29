@@ -169,6 +169,13 @@ export type CommandRisk = 'safe' | 'modify' | 'delete' | 'risky'
  */
 export type RiskKind = 'safe' | 'unknown' | 'modify' | 'delete' | 'dangerous'
 
+/** 命中的 MITRE ATT&CK 标注（仅辅助展示，不替代风险分级） */
+export interface AttackMatch {
+  label: string
+  tactic: string
+  techniques: string[]
+}
+
 /** AI 提出的待执行命令 */
 export interface ProposedCommand {
   commandId: string
@@ -178,6 +185,8 @@ export interface ProposedCommand {
   risk: CommandRisk
   /** 展示用风险类别（未知 vs 危险分离），供审批框醒目区分 */
   riskKind?: RiskKind
+  /** 命中的 ATT&CK 标注（供审批框辅助理解） */
+  attacks?: AttackMatch[]
   /** 是否已由系统自动批准执行 */
   autoApproved: boolean
 }
@@ -190,6 +199,8 @@ export interface CommandOutcome {
   risk: CommandRisk
   /** 展示用风险类别 */
   riskKind?: RiskKind
+  /** 命中的 ATT&CK 标注 */
+  attacks?: AttackMatch[]
   result?: CommandResult
   error?: string
   /** 用户明确拒绝执行 */

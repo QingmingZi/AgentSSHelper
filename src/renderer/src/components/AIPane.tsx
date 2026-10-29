@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import { api } from '../api'
 import type {
   AiMetrics,
+  AttackMatch,
   CommandOutcome,
   CommandProgress,
   CommandRisk,
@@ -50,6 +51,8 @@ interface CommandCard {
   risk: CommandRisk
   /** 展示用风险类别（未知 vs 危险分离），缺省时回退自 risk */
   riskKind?: RiskKind
+  /** 命中的 MITRE ATT&CK 标注 */
+  attacks?: AttackMatch[]
   status: CardStatus
   result?: CommandResult
   /** 执行中的实时输出（长时命令如 yum update），用于展示进度 */
@@ -304,6 +307,7 @@ export default function AIPane({
             command: c.command,
             risk: c.risk,
             riskKind: c.riskKind,
+            attacks: c.attacks,
             // 已被策略自动批准的命令直接进入执行中，避免闪现审批按钮
             status: (c.autoApproved ? 'running' : 'pending') as CardStatus
           }))
@@ -736,6 +740,12 @@ export default function AIPane({
               : card.riskKind === 'modify' || (!card.riskKind && card.risk === 'modify')
                 ? '修改类命令，执行前需你确认。'
                 : '该命令无法静态判定风险（未知），执行前需你确认。'}
+        </p>
+      )}
+
+      {card.attacks && card.attacks.length > 0 && (
+        <p className="cmd-hint cmd-attack" title="MITRE ATT&CK 技术标注（辅助理解，不替代分级）">
+          ATT&CK：{card.attacks.map((a) => `${a.label}${a.techniques.length ? `（${a.techniques.join('、')}）` : ''}`).join('；')}
         </p>
       )}
 

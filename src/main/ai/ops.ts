@@ -11,6 +11,8 @@ import type {
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { AiClient, estimateMessagesTokens, type ChatMessage } from './client'
+import { matchAttackRules } from './attackRules'
+import { taintRequiresConfirmation } from './taint'
 import type { Store } from '../core/store'
 import type { SessionManager } from '../ssh/manager'
 import { shouldSearch } from '../search/baiduSearch'
@@ -928,6 +930,11 @@ export class AiOpsService extends EventEmitter {
     if (risk === 'safe' && isAstReady() && analyzeAstDanger(first).length > 0) {
       risk = 'risky'
     }
+    // 污点闸门（阶段3）：命令文本若残留命令块协议标记 / 不可信块标签，说明模型可能
+    // 回显了不可信来源（检索/远端输出）的内容 → 强制「需确认」，永不自动执行。
+    if (risk === 'safe' && taintRequiresConfirmation(first)) {
+      risk = 'risky'
+    }
     // 单步执行：唯一命令可自动执行（取决于其风险与开关），无需等待后继
     const autoApproved = canAutoApprove(risk, config)
     const record: ProposedCommand = {
@@ -937,6 +944,7 @@ export class AiOpsService extends EventEmitter {
       command: first,
       risk,
       riskKind: classifyRiskKind(first, risk),
+      attacks: matchAttackRules(first),
       autoApproved
     }
 
@@ -967,6 +975,7 @@ export class AiOpsService extends EventEmitter {
         command: proposal.command,
         risk: proposal.risk,
         riskKind: proposal.riskKind,
+        attacks: proposal.attacks,
         rejected: true
       }
       this.emit('command-outcome', outcome)

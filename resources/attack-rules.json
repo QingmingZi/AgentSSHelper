@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "_note": "危险命令 → ATT&CK 技术映射（辅助展示，不替代分级）。随应用打包，离线可用。",
+  "rules": [
+    { "match": "\\bsudo\\b", "techniques": ["T1548.003", "T1059.004"], "label": "提权/Shell 执行", "tactic": "Privilege Escalation" },
+    { "match": "\\bsu\\s+", "techniques": ["T1548.003"], "label": "切换用户提权", "tactic": "Privilege Escalation" },
+    { "match": "\\beval\\b", "techniques": ["T1059.004"], "label": "动态代码执行", "tactic": "Execution" },
+    { "match": "\\bsource\\b|(?:^|[;|&]\\s*)\\.\\s+\\S*\\.(sh|bash|zsh)\\b", "techniques": ["T1059.004", "T1053"], "label": "脚本加载执行", "tactic": "Execution" },
+    { "match": "\\b(bash|sh|zsh|python|python3|perl|ruby)\\s+-c\\b", "techniques": ["T1059"], "label": "命令解释器执行", "tactic": "Execution" },
+    { "match": "\\bawk\\b[^|;]*(system|popen|spawn|execl)", "techniques": ["T1059.004"], "label": "awk 执行子命令", "tactic": "Execution" },
+    { "match": "\\brm\\s+-[a-z]*r[a-z]*\\s+(/?|\\$HOME|\\*|\\b/\\.)", "techniques": ["T1485", "T1070.004"], "label": "递归删除(高危)", "tactic": "Impact" },
+    { "match": "\\b(chmod|chown)\\s+-?R?\\s+[0-7]{3}|\\bchmod\\s+[0-7]{3}\\s+/", "techniques": ["T1222.002"], "label": "权限修改", "tactic": "Defense Evasion" },
+    { "match": "\\bmv\\s+[^|;]+\\s+(/etc/passwd|/etc/shadow|/etc/sudoers)\\b", "techniques": ["T1222", "T1548.003"], "label": "替换系统账户/权限文件", "tactic": "Defense Evasion" },
+    { "match": "\\b(cat|echo|printf|tee)\\b.*(/etc/passwd|/etc/shadow|/etc/sudoers)\\b", "techniques": ["T1548.003", "T1112"], "label": "写入账户/权限文件", "tactic": "Defense Evasion" },
+    { "match": "\\biptables\\b|\\b(ufw|firewall-cmd)\\b.*\\b(flush|delete|DROP)\\b", "techniques": ["T1562.004"], "label": "干扰防火墙/HIDS", "tactic": "Defense Evasion" },
+    { "match": "\\bhistory\\s+-c|\\brm\\s+.*history", "techniques": ["T1070.003"], "label": "清除命令历史", "tactic": "Defense Evasion" },
+    { "match": "\\bjournalctl\\s+--vacuum|\\b(dmesg|wtmp|btmp)\\b.*\\b(clear|truncate)\\b", "techniques": ["T1070.001"], "label": "清除日志", "tactic": "Defense Evasion" },
+    { "match": "\\bcurl\\b|\\bwget\\b", "techniques": ["T1105"], "label": "从网络拉取(供料)", "tactic": "Command and Control" },
+    { "match": "\\b(nc|netcat|socat)\\b", "techniques": ["T1571", "T1043"], "label": "网络连接工具", "tactic": "Command and Control" },
+    { "match": "\\btar\\b|\\bgzip\\b|\\bzip2\\b|\\b7z\\b", "techniques": ["T1560.001"], "label": "打包压缩(供料/数据收集)", "tactic": "Collection" },
+    { "match": "/etc/shadow|/etc/passwd|/proc/1/environ|\\bid_rsa\\b|\\.ssh/|Login Data|Cookies|Msg.db|Vault|Keychain", "techniques": ["T1552.001", "T1003.008"], "label": "读取凭据/口令文件", "tactic": "Credential Access" },
+    { "match": "\\btcpdump\\b|\\b(tshark|ettercap)\\b", "techniques": ["T1040"], "label": "网络抓包", "tactic": "Credential Access" },
+    { "match": "\\bfind\\s+.*-delete", "techniques": ["T1485"], "label": "批量删除", "tactic": "Impact" }
+  ]
+}
