@@ -150,13 +150,24 @@ export interface AiMessage {
 }
 
 /**
- * 命令风险分级
+ * 命令风险分级（内部判定，供安全模型使用）
  * - safe   只读命令，位于白名单内
  * - modify 修改系统或文件状态
  * - delete 删除数据
  * - risky  无法静态判定（复合命令、未知程序），始终需要人工确认
  */
 export type CommandRisk = 'safe' | 'modify' | 'delete' | 'risky'
+
+/**
+ * 展示用风险类别（对齐三轴改进 v3 的「四级分离、审批框可读」）：
+ * - safe         只读，可自动执行
+ * - unknown      未见危险、但无法静态判定（未知程序 / 命令替换 / 复合）
+ * - modify       修改型（非删除），需确认
+ * - delete       删除数据，需确认
+ * - dangerous    高危（sudo/su/source/eval/嵌套危险命令名等），需确认且醒目提示
+ * 由内部 CommandRisk 派生，仅用于 UI 展示区分，不影响内部安全判定。
+ */
+export type RiskKind = 'safe' | 'unknown' | 'modify' | 'delete' | 'dangerous'
 
 /** AI 提出的待执行命令 */
 export interface ProposedCommand {
@@ -165,6 +176,8 @@ export interface ProposedCommand {
   messageId: string
   command: string
   risk: CommandRisk
+  /** 展示用风险类别（未知 vs 危险分离），供审批框醒目区分 */
+  riskKind?: RiskKind
   /** 是否已由系统自动批准执行 */
   autoApproved: boolean
 }
@@ -175,6 +188,8 @@ export interface CommandOutcome {
   sessionId: string
   command: string
   risk: CommandRisk
+  /** 展示用风险类别 */
+  riskKind?: RiskKind
   result?: CommandResult
   error?: string
   /** 用户明确拒绝执行 */

@@ -7,7 +7,8 @@ import type {
   CommandProgress,
   CommandRisk,
   CommandResult,
-  ProposedCommand
+  ProposedCommand,
+  RiskKind
 } from '@shared/types'
 import { getTerminalContext } from '../terminalBuffer'
 import Markdown from './Markdown'
@@ -47,6 +48,8 @@ interface CommandCard {
   messageId: string
   command: string
   risk: CommandRisk
+  /** 展示用风险类别（未知 vs 危险分离），缺省时回退自 risk */
+  riskKind?: RiskKind
   status: CardStatus
   result?: CommandResult
   /** 执行中的实时输出（长时命令如 yum update），用于展示进度 */
@@ -54,10 +57,13 @@ interface CommandCard {
   error?: string
 }
 
-const RISK_LABEL: Record<CommandRisk, string> = {
+/** 展示用风险标签：四级分离，DANGEROUS 醒目 */
+const RISK_LABEL: Record<RiskKind | CommandRisk, string> = {
   safe: '只读',
+  unknown: '需确认',
   modify: '修改',
   delete: '删除',
+  dangerous: '危险',
   risky: '需确认'
 }
 
@@ -297,6 +303,7 @@ export default function AIPane({
             messageId: c.messageId ?? '',
             command: c.command,
             risk: c.risk,
+            riskKind: c.riskKind,
             // 已被策略自动批准的命令直接进入执行中，避免闪现审批按钮
             status: (c.autoApproved ? 'running' : 'pending') as CardStatus
           }))
@@ -716,17 +723,19 @@ export default function AIPane({
             aria-label={`选择命令 ${card.command}`}
           />
         )}
-        <span className={`risk-tag ${card.risk}`}>{RISK_LABEL[card.risk]}</span>
+        <span className={`risk-tag ${card.riskKind ?? (card.risk as string)}`}>{RISK_LABEL[card.riskKind ?? card.risk]}</span>
         <code className="cmd-text">{card.command}</code>
       </div>
 
       {card.risk !== 'safe' && card.status === 'pending' && (
         <p className="cmd-hint">
-          {card.risk === 'delete'
-            ? '删除类命令，执行前需你确认。'
-            : card.risk === 'modify'
-              ? '修改类命令，执行前需你确认。'
-              : '该命令无法静态判定风险，执行前需你确认。'}
+          {card.riskKind === 'dangerous'
+            ? '⚠️ 高危命令（可执行任意代码/提权），执行前务必核对。'
+            : card.riskKind === 'delete' || (!card.riskKind && card.risk === 'delete')
+              ? '删除类命令，执行前需你确认。'
+              : card.riskKind === 'modify' || (!card.riskKind && card.risk === 'modify')
+                ? '修改类命令，执行前需你确认。'
+                : '该命令无法静态判定风险（未知），执行前需你确认。'}
         </p>
       )}
 

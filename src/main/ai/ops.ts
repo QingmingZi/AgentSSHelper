@@ -5,7 +5,8 @@ import type {
   CommandProgress,
   CommandRisk,
   CommandResult,
-  ProposedCommand
+  ProposedCommand,
+  RiskKind
 } from '@shared/types'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -533,6 +534,29 @@ export function canAutoApprove(risk: CommandRisk, config: AiConfig): boolean {
   return false
 }
 
+/**
+ * 派生出展示用风险类别（四级分离），供审批框把 UNKNOWN 与 DANGEROUS 分开显示。
+ * 内部安全判定仍以 CommandRisk 为准；这里只做 UI 可读性分类。
+ */
+export function classifyRiskKind(command: string, risk: CommandRisk): RiskKind {
+  if (risk === 'safe') return 'safe'
+  if (risk === 'modify') return 'modify'
+  if (risk === 'delete') return 'delete'
+  // risk === 'risky'：区分 dangerous（会执行任意代码/提权）与 unknown（只是无法静态判定）
+  if (/\b(sudo|su|eval|source)\b/.test(command)) return 'dangerous'
+  // 点号 source（`. ./env.sh`、`. 某脚本`），要求是命令位置的点号
+  if (/(^|[\n;|&]\s*|&&?\s*)\.\s+[^\s]/.test(command)) return 'dangerous'
+  // 调用解释器直接执行字符串
+  if (/\b(bash|sh|zsh|python|perl|ruby)\s+-c\b/i.test(command)) return 'dangerous'
+  // AST 已就绪且检出台危险**命令名**（嵌套的 sudo/su/eval/source 等）→ dangerous；
+  // 命令/进程替换（$(...)、<(...)）仅属“需确认的未知”，不视为 privesc/code-exec 级危险。
+  if (isAstReady()) {
+    const signals = analyzeAstDanger(command)
+    if (signals.some((s) => /危险命令名/.test(s))) return 'dangerous'
+  }
+  return 'unknown'
+}
+
 /** 命令块的各种结束标记：标准 `:::`，或模型偶尔自学的 EOF / EOT */
 
 /**
@@ -912,6 +936,7 @@ export class AiOpsService extends EventEmitter {
       messageId,
       command: first,
       risk,
+      riskKind: classifyRiskKind(first, risk),
       autoApproved
     }
 
@@ -941,6 +966,7 @@ export class AiOpsService extends EventEmitter {
         sessionId: proposal.sessionId,
         command: proposal.command,
         risk: proposal.risk,
+        riskKind: proposal.riskKind,
         rejected: true
       }
       this.emit('command-outcome', outcome)

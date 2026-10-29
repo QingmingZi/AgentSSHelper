@@ -1028,9 +1028,16 @@ button {
   color: var(--red);
 }
 
-.risk-tag.risky {
+.risk-tag.risky,
+.risk-tag.unknown {
   background: rgba(192, 132, 252, 0.16);
   color: var(--purple);
+}
+
+.risk-tag.dangerous {
+  background: rgba(248, 113, 113, 0.28);
+  color: var(--red);
+  font-weight: 700;
 }
 
 .cmd-hint {

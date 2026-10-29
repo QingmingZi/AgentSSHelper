@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { Store } from '../main/core/store'
 import { SessionManager } from '../main/ssh/manager'
 import { SystemUsageMonitor } from '../main/ssh/monitor'
-import { AiOpsService, classifyCommand, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger } from '../main/ai/ops'
+import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger } from '../main/ai/ops'
 import { AiClient } from '../main/ai/client'
 import { shouldSearch, extractSearchKeyword, extractWebResults } from '../main/search/baiduSearch'
 import {
@@ -606,6 +606,18 @@ async function run(): Promise<number> {
     assert('AST 放行 ls 只读', !astHas('ls -la /'), astSignals('ls -la /').join('|'))
     assert('AST 放行 awk 只读', !astHas("awk -F: '{print $2}' /etc/passwd"), astSignals("awk -F: '{print $2}' /etc/passwd").join('|'))
     assert('AST 放行管道只读', !astHas('df -h | sort -k5 -h'), astSignals('df -h | sort -k5 -h').join('|'))
+
+    // ---------------------------------------------- 阶段2：四级风险展示分离（UNKNOWN vs DANGEROUS）
+    assert('四级-只读→safe', classifyRiskKind('ls -la /', classifyCommand('ls -la /')) === 'safe')
+    assert('四级-删除→delete', classifyRiskKind('rm -rf /data', classifyCommand('rm -rf /data')) === 'delete')
+    assert('四级-写入→modify', classifyRiskKind('touch /tmp/x', classifyCommand('touch /tmp/x')) === 'modify')
+    assert('四级-未知→unknown', classifyRiskKind('frobnicate --all', classifyCommand('frobnicate --all')) === 'unknown')
+    assert('四级-sudo→dangerous', classifyRiskKind('sudo apt update', classifyCommand('sudo apt update')) === 'dangerous')
+    assert('四级-eval→dangerous', classifyRiskKind('eval $cmd', classifyCommand('eval $cmd')) === 'dangerous')
+    assert('四级-source→dangerous', classifyRiskKind('source ./env.sh', classifyCommand('source ./env.sh')) === 'dangerous')
+    assert('四级-进程替换→unknown', classifyRiskKind('cat <(echo hi)', classifyCommand('cat <(echo hi)')) === 'unknown')
+    assert('四级-命令替换→unknown', classifyRiskKind('echo $(hostname)', classifyCommand('echo $(hostname)')) === 'unknown')
+    assert('四级-嵌套命令名→dangerous', classifyRiskKind('grep foo; sudo rm /x', classifyCommand('grep foo; sudo rm /x')) === 'dangerous')
 
     // --------------------------------------------------- 命令提案解析
     const reply = `先看下磁盘。\n:::command\ndf -h\n:::\n再看看内存。\n:::command\nfree -m\n:::`
