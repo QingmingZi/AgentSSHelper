@@ -7,13 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { Store } from '../main/core/store'
 import { SessionManager } from '../main/ssh/manager'
 import { SystemUsageMonitor } from '../main/ssh/monitor'
-import {
-  AiOpsService,
-  classifyCommand,
-  extractCommands,
-  readsSensitivePath,
-  sanitizeUntrusted
-} from '../main/ai/ops'
+import { AiOpsService, classifyCommand, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger } from '../main/ai/ops'
 import { AiClient } from '../main/ai/client'
 import { shouldSearch, extractSearchKeyword, extractWebResults } from '../main/search/baiduSearch'
 import {
@@ -587,6 +581,31 @@ async function run(): Promise<number> {
     // 密钥最后 4 位展示用 extractSearchKeyword / shouldSearch 不变
     assert('extractSearchKeyword 提炼关键词', extractSearchKeyword('nginx 最新版本 怎么配置') !== '')
     assert('本机问句不应触发搜索', shouldSearch('目前这款系统版本是多少') === false)
+
+    // ------------------------------------------------ 阶段2：只读工具面 + AST 加严
+    // AST 初始化在 electron 主进程内执行（web-tree-sitter wasm）；加载失败仅为不可用，不抛。
+    await initShellAst()
+    assert('AST bash 语法解析已就绪', isAstReady(), 'not ready: ' + (isAstReady() ? '' : 'false'))
+    const astSignals = (cmd: string): string[] => {
+      try {
+        return analyzeAstDanger(cmd)
+      } catch (e) {
+        return [`ERR:${e}`]
+      }
+    }
+    const astHas = (cmd: string): boolean => astSignals(cmd).length > 0
+
+    // AST 结构性危险：写文件重定向 / 命令替换 / 进程替换 / 嵌套 sudo/./source/eval
+    assert('AST 检出写文件重定向', astHas('echo hi > /tmp/out.txt'), astSignals('echo hi > /tmp/out.txt').join('|'))
+    assert('AST 不把 /dev/null 当写文件', !astSignals('echo hi > /dev/null').some((s) => s.includes('写文件重定向')), astSignals('echo hi > /dev/null').join('|'))
+    assert('AST 检出命令替换 $(...)', astHas('cat $(whoami)'), astSignals('cat $(whoami)').join('|'))
+    assert('AST 检出进程替换 <(...)', astHas('cat <(echo hi)'), astSignals('cat <(echo hi)').join('|'))
+    assert('AST 检出嵌套 sudo', astHas('echo x && sudo cat /etc/shadow'), astSignals('echo x && sudo cat /etc/shadow').join('|'))
+    assert('AST 检出 eval', astHas('eval $cmd'), astSignals('eval $cmd').join('|'))
+    // 正常只读命令不应被 AST 误判为危险
+    assert('AST 放行 ls 只读', !astHas('ls -la /'), astSignals('ls -la /').join('|'))
+    assert('AST 放行 awk 只读', !astHas("awk -F: '{print $2}' /etc/passwd"), astSignals("awk -F: '{print $2}' /etc/passwd").join('|'))
+    assert('AST 放行管道只读', !astHas('df -h | sort -k5 -h'), astSignals('df -h | sort -k5 -h').join('|'))
 
     // --------------------------------------------------- 命令提案解析
     const reply = `先看下磁盘。\n:::command\ndf -h\n:::\n再看看内存。\n:::command\nfree -m\n:::`

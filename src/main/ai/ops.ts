@@ -20,6 +20,15 @@ import {
   DEFAULT_SNIPPET_LEN
 } from '../search/provider'
 import { createBaiduProvider } from '../search/baidu'
+import { initShellAst, isAstReady, analyzeAstDanger } from './ast'
+
+// AST/bash 语法解析在应用启动时预热一次（wasm），供命令分级「只加严」；
+// 失败自动回退正则分级，不影响启动与安全性。
+// 在模块加载时触发，确保 index 与 smoke 共用同一 AST 实例（避免打包 split 出多份状态）。
+void initShellAst()
+
+// 供测试与上层访问同一 AST 实例，避免跨 bundle 出现多份初始化的 parser。
+export { initShellAst, isAstReady, analyzeAstDanger } from './ast'
 
 /** 命令提案块格式：
  * :::command
@@ -890,6 +899,11 @@ export class AiOpsService extends EventEmitter {
     // 读取敏感文件（口令哈希、私钥、环境变量等）的命令即使被判 safe，
     // 也强制升级为 risky 需人工确认，防止凭据/隐私数据免确认读取并外发给 LLM。
     if (risk === 'safe' && readsSensitivePath(first)) risk = 'risky'
+    // AST 只加严：safe 中若被解析出「写文件重定向 / 命令替换 / 嵌套危险命令名」等
+    // 结构上更严格的隐患，也强制升级为 risky。AST 未就绪时保持既有判定（不放松）。
+    if (risk === 'safe' && isAstReady() && analyzeAstDanger(first).length > 0) {
+      risk = 'risky'
+    }
     // 单步执行：唯一命令可自动执行（取决于其风险与开关），无需等待后继
     const autoApproved = canAutoApprove(risk, config)
     const record: ProposedCommand = {
