@@ -3,6 +3,7 @@ out/
 release/
 dist/
 .vite/
+tmp/
 *.tsbuildinfo
 *.log
 .tmp-*

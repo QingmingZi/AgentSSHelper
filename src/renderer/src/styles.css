@@ -1045,6 +1045,10 @@ button {
   font-size: 12.5px;
   color: var(--text);
   word-break: break-all;
+  /* 保留命令原有的换行与前导空格（heredoc 缩进、YAML 等必须原样）：
+     默认 white-space:normal 会折叠连续空白并把换行当空格，导致命令显示
+     缩进丢失、单行挤成一团，用户据此观察/重建命令时就看到"前导空格被吃"。 */
+  white-space: pre-wrap;
 }
 
 .cmd-output {
