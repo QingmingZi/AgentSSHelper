@@ -17,6 +17,15 @@ import {
 import { AiClient } from '../main/ai/client'
 import { shouldSearch, extractSearchKeyword, extractWebResults } from '../main/search/baiduSearch'
 import {
+  SearchManager,
+  wrapSearchBlock,
+  type SearchProvider,
+  type SearchOptions,
+  type SearchOutcome,
+  DEFAULT_TOP_K
+} from '../main/search/provider'
+import { BaiduSearchProvider } from '../main/search/baidu'
+import {
   downloadDirectory,
   downloadFile,
   listRemoteDir,
@@ -531,6 +540,54 @@ async function run(): Promise<number> {
     expectRisky('custom-script --check', '⑨ 未知自定义脚本')
     expectRisky('proprietary-tool -v', '⑨ 未知工具')
 
+    // ------------------------------------------------ 阶段1：检索 Provider 抽象
+    // wrapSearchBlock：结果必须带「不可信数据」标签，且不脱离消毒要求
+    const wrapped = wrapSearchBlock({ keyword: 'k', snippet: '摘要snip', count: 2 })
+    assert(
+      '检索块以 search_results 不可信标签包裹',
+      wrapped.startsWith('<search_results trust="untrusted"') && wrapped.includes('</search_results>'),
+      wrapped
+    )
+    assert('检索块内含原始关键词', wrapped.includes('摘要snip'))
+
+    // 可靠 provider：搜索成功，冷却状态清除
+    const goodProvider: SearchProvider = {
+      name: 'good',
+      search: async (q) => ({ keyword: q, snippet: `ok:${q}`, count: 1 })
+    }
+    const mgr = new SearchManager([goodProvider])
+    const r1 = await mgr.search('nginx 最新版', { topK: DEFAULT_TOP_K })
+    assert('可靠 provider 返回结果', r1?.keyword === 'nginx 最新版')
+    assert('可靠 provider 不进入冷却', mgr.coolingDown().length === 0, JSON.stringify(mgr.coolingDown()))
+
+    // 失败 provider：首次失败进入冷却，冷却期内短路不再发起请求
+    let calls = 0
+    const flakyProvider: SearchProvider = {
+      name: 'flaky',
+      search: async () => {
+        calls++
+        return null // 模拟失败/无结果
+      }
+    }
+    const mgr2 = new SearchManager([flakyProvider], { initialBackoffMs: 5_000 })
+    assert('失败 provider 第一次调用', (await mgr2.search('x', { topK: 3 })) === null)
+    assert('失败 provider 已进入冷却', mgr2.coolingDown().includes('flaky'))
+    const coolsBefore = mgr2.coolingDown().length
+    await mgr2.search('y', { topK: 3 }) // 冷却中：直接短路，不发请求
+    assert('冷却期内短路不重复发起请求', calls === 1 && mgr2.coolingDown().length === coolsBefore, `calls=${calls}`)
+
+    // 空 provider 链：返回 null，不抛错
+    const mgr3 = new SearchManager([])
+    assert('空 provider 链返回 null', (await mgr3.search('anything', { topK: 3 })) === null)
+
+    // BaiduSearchProvider 无密钥：直接返回 null（不触网）
+    const noKey = new BaiduSearchProvider('')
+    assert('Baidu provider 无密钥返回 null', (await noKey.search('cve-2024', { topK: 3 })) === null)
+
+    // 密钥最后 4 位展示用 extractSearchKeyword / shouldSearch 不变
+    assert('extractSearchKeyword 提炼关键词', extractSearchKeyword('nginx 最新版本 怎么配置') !== '')
+    assert('本机问句不应触发搜索', shouldSearch('目前这款系统版本是多少') === false)
+
     // --------------------------------------------------- 命令提案解析
     const reply = `先看下磁盘。\n:::command\ndf -h\n:::\n再看看内存。\n:::command\nfree -m\n:::`
     const parsed = extractCommands(reply)
@@ -1024,7 +1081,7 @@ async function run(): Promise<number> {
     const sp = buildSystemPrompt(searchCfg, { label: 'x', username: 'u', host: 'h', port: 22 } as never)
     assert(
       '开启搜索增强后系统提示注入联网检索引导',
-      sp.includes('在线资料') && sp.includes('百度搜索')
+      sp.includes('search_results') && sp.includes('百度搜索') && sp.includes('本机实际执行的命令输出为准')
     )
 
     mockServer.close()
