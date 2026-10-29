@@ -9,6 +9,7 @@ import {
 } from './connection'
 import type { Store } from '../core/store'
 import { WslSession } from '../wsl/session'
+import { listWslDistros } from '../wsl/discover'
 
 export interface ConnectOutcome {
   sessionId: string
@@ -124,6 +125,11 @@ export class SessionManager extends EventEmitter {
    * 使终端 / 文件传输 / AI 运维可像对待远程主机一样使用。
    */
   async connectWsl(distro: string): Promise<{ sessionId: string; profileId: string }> {
+    // 校验发行版名来自本机枚举结果，杜绝指向未安装的发行版（如遍历/拼接注入）。
+    const available = listWslDistros().map((d) => d.name)
+    if (!distro || !available.includes(distro)) {
+      throw new Error(`WSL 发行版不存在或不可用: ${distro ?? '(空)'}`)
+    }
     const sessionId = randomUUID()
     const session = new WslSession(sessionId, distro)
     const profileId = session.profile.id

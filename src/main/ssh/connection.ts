@@ -58,6 +58,8 @@ export interface ISshSession {
   readonly id: string
   readonly profile: HostProfile
   readonly isConnected: boolean
+  /** 是否为本地会话（本机 WSL）：true 表示命令作用于本机，需更谨慎与显式区分 */
+  readonly isLocal: boolean
   connect(credentials: SessionCredentials, onTrust: (fingerprint: string, keyType: string) => void): Promise<ConnectResult>
   startShell(options?: ShellOptions): Promise<void>
   write(data: string): void
@@ -73,6 +75,8 @@ export interface ISshSession {
 export class SshSession extends EventEmitter implements ISshSession {
   readonly id: string
   readonly profile: HostProfile
+  /** SSH 是远端主机会话 */
+  readonly isLocal = false
 
   private client: Client | null = null
   private shellChannel: ClientChannel | null = null

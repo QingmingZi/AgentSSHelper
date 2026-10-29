@@ -604,21 +604,31 @@ export function sanitizeUntrusted(text: string, maxLength = 4000): string {
 
 /**
  * 命中敏感文件路径的命令应降级为需确认，防止凭据/隐私数据不经确认就进入 LLM 请求。
- * 覆盖：口令哈希文件、SSH 私钥、进程环境变量、dotenv、私钥/证书材料。
+ * 覆盖：口令哈希文件、SSH 私钥、进程环境变量、dotenv、私钥/证书材料，
+ * 以及 Windows/WSL 本机用户数据（浏览器凭据库、Cookie、聊天/邮件本地库、应用数据）。
  */
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /\/(etc\/)?s?hadow\b/i, // /etc/shadow、/etc/gshadow
-  /(^|\/)\.[\w-]*(ssh|gnupg|aws|docker|kube|config|env)/, // dot 目录/文件（.env、.ssh 等）
+  // dot 目录/文件（.env、.ssh、.aws、.config、.gnupg、.docker、.kube 等）。
+  // 注意用 [\w.-]* 而非 [\w-]*：\w 不含点号，否则所有「点目录」都会漏检。
+  /(^|\/)\.[\w.-]*(ssh|gnupg|aws|docker|kube|config|env)/,
   /\b(id_rsa|id_ed25519|id_ecdsa|id_dsa)(\.pub)?\b/i, // 私钥
   /\/proc\/\d+\/environ\b/i, // 进程环境变量
   /\.(pem|key|pfx|p12)(\s|$)/i, // 私钥/证书材料
   /(^|\/)(\.env|\.env\.\S+)(\s|$)/i, // dotenv
   /(^|\/)\.bash_history\b/i, // shell 历史（常含内联密码）
-  /\/etc\/ssh\/(sshd|ssh)_config\b/i // SSH 配置
+  /\/etc\/ssh\/(sshd|ssh)_config\b/i, // SSH 配置
+  // ---- Windows / WSL 本机数据（经 /mnt/c/... 或 C:/...、C:\... 路径） ----
+  /((^|\/)mnt\/[a-z]\/|(^|\s)[a-z]:[\\/])Users\/[^/\\\s]+\/AppData\/(Local|Roaming|LocalLow)/i, // 应用数据目录
+  /\/(Login Data|Cookies|Web Data|History)\b/i, // 浏览器凭据/cookie/历史库
+  /\.(sqlite|sqlite3|db)(\s|$)/i, // 各类本地数据库（浏览器/聊天/邮件）
+  /\/mnt\/c\/Users\/[^/]+\/(\.ssh|\.aws|\.config|\.gnupg|\.kube)\b/i, // Windows 用户 dot 目录经 WSL
+  /\/(Vault|Keychain|LoginKeychain)\b/i, // 系统密钥库
+  /\brdp\b[^|;]*(\.rdp|cred|Default\.rdp)\b/i // 远程桌面凭据
 ]
 
 /** 命令是否读取敏感文件/凭据（命中则不应免确认自动执行） */
-function readsSensitivePath(command: string): boolean {
+export function readsSensitivePath(command: string): boolean {
   return SENSITIVE_PATH_PATTERNS.some((re) => re.test(command))
 }
 
@@ -631,12 +641,23 @@ export function redactSecrets(text: string): string {
   return text
     // OpenSSH / PEM 私钥块
     .replace(/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)/g, '$1 [REDACTED] $2')
-    // 常见敏感字段：password / passwd / token / secret / api key / apikey / access_key / bearer
-    .replace(/(password|passwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|bearer)\s*[:=]\s*["']?[^\s"'&,;]+/gi, '$1=[REDACTED]')
+    // 常见敏感字段（含 JSON 形式）：键名带可选引号，值前允许引号与空白，
+    // 例如 `secret:x`、`"secret":"x"`、`'token' = "x"`、`chrome_cookie=APoE…` 都能命中。
+    .replace(
+      /["']?(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|bearer|refresh[_-]?token|auth[_-]?token|cookie|cookies)["']?\s*[:=]\s*["']?[^\s"'&,;{}]+/gi,
+      '$1=[REDACTED]'
+    )
+    // JSON 键值对里敏感字段后跟紧跟引号结尾的值（如 "secret":"9f8e…"）兜底
+    .replace(
+      /["'](secret|token|password|api[_-]?key|client[_-]?secret|flag|cookie)["']\s*:\s*["']([^"']{4,})["']/gi,
+      '"$1":"[REDACTED]"'
+    )
     // 哈希值形态的口令（如 shadow 里的 $6$... 或 md5 长串），保守匹配长 base64 簇
     .replace(/\$\d\$[A-Za-z0-9./]{16,}/g, '[REDACTED]')
     // 疑似 API 密钥（sk-、AK 开头等）
     .replace(/\b(sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b/g, '[REDACTED]')
+    // 兜底：出现在敏感字段名之后、长度>=32 的连续 base64/hex 簇（上下文相关，避免误伤正文）。
+    .replace(/(["']?(secret|token|password|cookie|key)["']?\s*[:=]\s*["']?)[A-Za-z0-9+/=_-]{32,}/gi, '$1[REDACTED]')
     .trim()
 }
 
@@ -653,6 +674,8 @@ export interface HostContext {
   username: string
   osInfo: string
   workingDir: string
+  /** 是否本机会话（WSL）：用于提示词与 UI 区分本机/远端，避免用户误操作本机 */
+  isLocal?: boolean
 }
 
 export const DEFAULT_SYSTEM_PROMPT = `你是一名资深 Linux 运维工程师（SRE），通过 SSH 远程管理 Linux 服务器。
@@ -737,7 +760,9 @@ export function buildSystemPrompt(config: AiConfig, context: HostContext): strin
 地址：${context.username}@${context.host}:${context.port}
 系统信息：${context.osInfo || '未知'}
 当前工作目录：${context.workingDir || '未知'}
----
+${context.isLocal
+    ? `**⚠️ 本机会话提醒**：当前连接的是本机 WSL 环境（Windows），不是远端服务器。你执行的每一条命令都会直接作用于本机系统及 Windows 用户数据目录（如 AppData、浏览器凭据库、Cookie、聊天/邮件本地库、各类 *.db/*.sqlite）。请格外谨慎：\n   - 不要读取并回显本机敏感文件内容（浏览器登录数据、Cookie、令牌、密钥、数据库文件）；\n   - 涉及本机文件系统的读取前，明确说明将读取的是本机路径；\n   - 若需查看更多系统诊断，优先使用只读命令。`
+    : ''}---
 
 ${LINUX_SKILLS_PROMPT}${searchHint}`
 }
@@ -985,15 +1010,16 @@ export class AiOpsService extends EventEmitter {
 
   /** 读取远端系统信息，作为 AI 上下文 */
   async collectHostContext(sessionId: string): Promise<HostContext> {
-    const profile = this.sessions.get(sessionId).profile
+    const session = this.sessions.get(sessionId)
+    const profile = session.profile
     let osInfo = ''
     let workingDir = ''
     try {
       const [os, pwd] = await Promise.all([
-        this.sessions.get(sessionId).exec('cat /etc/os-release 2>/dev/null || uname -a', {
+        session.exec('cat /etc/os-release 2>/dev/null || uname -a', {
           timeout: 8000
         }),
-        this.sessions.get(sessionId).exec('pwd', { timeout: 8000 })
+        session.exec('pwd', { timeout: 8000 })
       ])
       osInfo = (os.stdout || os.stderr).trim().split('\n').slice(0, 4).join('; ')
       workingDir = pwd.stdout.trim()
@@ -1006,7 +1032,8 @@ export class AiOpsService extends EventEmitter {
       port: profile.port,
       username: profile.username,
       osInfo,
-      workingDir
+      workingDir,
+      isLocal: session.isLocal
     }
   }
 

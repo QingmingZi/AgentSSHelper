@@ -53,6 +53,8 @@ export class WslSession extends EventEmitter implements ISshSession {
   readonly id: string
   readonly profile: HostProfile
   readonly distro: string
+  /** WSL 是本机会话：命令作用于本地 Windows/WSL，需更谨慎对待 */
+  readonly isLocal = true
 
   private ptyProcess: IPty | null = null
   private sftpBackend: WslSftp

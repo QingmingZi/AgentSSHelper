@@ -51,8 +51,11 @@ export function normalizeBaseUrl(baseUrl: string): string {
  * 约束：
  *  - 必须是合法 URL，且协议仅限 http/https（拒绝 file://、data://、ftp:// 等，
  *    否则可能被用于读取本地文件）；
- *  - 解析出的主机若为回环 / 链路本地 / 保留地址（如 169.254.169.254 云元数据、
- *    127.0.0.1、::1、fe80::），仅当显式传入 allowLoopback 时才允许。
+ *  - 回环地址（127.0.0.1 / localhost / ::1 / 0.0.0.0）：用于本地自建 LLM（如 Ollama），
+ *    必须显式传入 allowLoopback:true 才放行；
+ *  - 内网 / 链路本地 / 云元数据地址（192.168.*、10.*、172.16-31.*、169.254.* 等）：
+ *    **无条件拒绝**，任何 allowLoopback / allowLocal 开关都不得放开；
+ *    否则 API Key + 完整对话历史会外送至内网主机或云元数据（如 169.254.169.254）。
  *
  * @returns 校验通过返回规范化前的原始 baseUrl；失败抛 Error。
  */
@@ -68,24 +71,56 @@ export function assertSafeBaseUrl(baseUrl: string, opts: { allowLoopback?: boole
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`${opts.label ?? '接口地址'}仅支持 http/https 协议，不允许 ${parsed.protocol}//`)
   }
-  const host = parsed.hostname.toLowerCase()
-  // 判断是否回环/链路本地/保留地址（含 IPv6 压缩形式与 127.0.0.0/8）
-  const isLoopback =
-    host === 'localhost' ||
-    host === '::1' ||
-    /^127\.\d+\.\d+\.\d+$/.test(host) ||
-    /^0\.0\.0\.0$/.test(host)
-  const isLinkLocal =
-    /^fe80:/i.test(host) ||
-    /^169\.254\.\d+\.\d+$/.test(host) ||
-    /^192\.168\.\d+\.\d+$/.test(host) ||
-    /^(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/.test(host)
-  if ((isLoopback || isLinkLocal) && !opts.allowLoopback) {
+  const rawHost = parsed.hostname.toLowerCase()
+  // IPv6 的 hostname 可能带方括号（如 `[fe80::1]`），统一剥掉再做匹配
+  const host = rawHost.replace(/^\[|\]$/g, '')
+
+  // 内网 / 链路本地 / 保留 / 云元数据地址：无条件拒绝（不因 allowLoopback 放开）。
+  // SSRF 的核心风险是 API Key 和对话历史被送到攻击者可控的内网/元数据主机。
+  if (isBlockedPrivateHost(host)) {
     throw new Error(
-      `${opts.label ?? '接口地址'}指向 ${host}（内网/回环地址）。为避免 SSRF 与 API Key 外送至云元数据或内网主机，已拒绝。若确为内网自建服务，请在设置中显式允许并确认。`
+      `${opts.label ?? '接口地址'}指向 ${host}（内网/云元数据地址）。为避免 SSRF 与 API Key 外送至内网主机或云元数据，已拒绝，且此类地址不支持在设置中放开。`
+    )
+  }
+
+  // 回环地址：仅当显式允许本地 LLM 时才放行。
+  if (isLoopbackHost(host) && !opts.allowLoopback) {
+    throw new Error(
+      `${opts.label ?? '接口地址'}指向本机回环地址 ${host}。若确为本地自建 LLM 服务，请显式允许后确认。`
     )
   }
   return raw
+}
+
+/** 回环地址（本地只允许 loopback，不放行内网/私网段） */
+function isLoopbackHost(host: string): boolean {
+  return (
+    host === 'localhost' ||
+    host === '::1' ||
+    /^127\.\d+\.\d+\.\d+$/.test(host) ||
+    host === '0.0.0.0'
+  )
+}
+
+/**
+ * 内网 / 链路本地 / 保留 / 云元数据地址（含 IPv6 压缩形式）。
+ * 命中即无条件拒绝：API Key + 对话历史绝不能发往这些目标。
+ */
+function isBlockedPrivateHost(host: string): boolean {
+  return (
+    // 云元数据（阿里/腾讯/华为/AWS EC2 元数据服务）
+    /^169\.254\.\d+\.\d+$/.test(host) ||
+    // CGNAT 共享地址段 100.64.0.0/10
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+$/.test(host) ||
+    // RFC1918 私网：10/8、172.16-31/12、192.168/16
+    /^10\.\d+\.\d+\.\d+$/.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(host) ||
+    /^192\.168\.\d+\.\d+$/.test(host) ||
+    // 链路本地 IPv6
+    /^fe80:/i.test(host) ||
+    host === '::1' || // 保留/未指定，视为需显式允许
+    /^0\.0\.0\.0$/.test(host)
+  )
 }
 
 /** 错误响应体脱敏：剔除控制/ANSI 字符、压缩空白、截断、并隐藏疑似密钥文本 */
