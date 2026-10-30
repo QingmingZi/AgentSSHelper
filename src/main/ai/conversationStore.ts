@@ -64,6 +64,81 @@ function atomicWrite(file: string, content: string): void {
   }
 }
 
+const RISK_LABEL: Record<CommandRisk, string> = {
+  safe: '只读',
+  modify: '修改',
+  delete: '删除',
+  risky: '需确认'
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  pending: '待确认',
+  running: '执行中',
+  done: '已执行',
+  rejected: '已拒绝',
+  error: '执行出错'
+}
+
+function fmtTime(ts: number): string {
+  try {
+    return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+  } catch {
+    return String(ts)
+  }
+}
+
+/**
+ * 把某主机的对话 + 命令历史组装成一份可读的审计日志（Markdown）。
+ * 供「导出日志」使用；纯函数、可测试。
+ */
+export function buildAuditLog(
+  profileKey: string,
+  history: PersistedMessage[],
+  commandHistory: PersistedCommandEntry[]
+): string {
+  const lines: string[] = []
+  lines.push('# AgentSSHelper AI 运维日志', '')
+  lines.push(`- 主机标识：${profileKey}`)
+  lines.push(`- 导出时间：${fmtTime(Date.now())}`)
+  lines.push(`- 对话条数：${history.length}，命令 ${commandHistory.length} 条`, '', '---', '')
+
+  if (history.length === 0) {
+    lines.push('（无对话记录）')
+  }
+
+  for (const m of history) {
+    if (m.role === 'system') continue
+    const label = m.role === 'user' ? '我' : 'AI'
+    lines.push(`## ${label}`, '')
+    lines.push(m.content, '')
+    lines.push('')
+  }
+
+  if (commandHistory.length > 0) {
+    lines.push('---', '', '## 命令执行记录', '')
+    for (const c of commandHistory) {
+      const riskLabel = RISK_LABEL[c.risk] ?? c.risk
+      const stateLabel = STATUS_LABEL[c.status] ?? c.status
+      const attacks = c.attacks?.length
+        ? ` · ATT&CK: ${c.attacks.map((a) => `${a.label}${a.techniques.length ? `(${a.techniques.join('、')})` : ''}`).join('；')}`
+        : ''
+      lines.push(
+        `- **[${stateLabel}]** \`${c.command}\`（${riskLabel}${attacks}）· ${fmtTime(c.executedAt)}`
+      )
+      if (c.error) lines.push(`  - ❌ ${c.error}`)
+      if (c.result) {
+        const body = c.result.stdout || c.result.stderr || '(无输出)'
+        lines.push('  - 执行结果：')
+        for (const l of body.split('\n')) lines.push(`    - ${l}`)
+        if (c.result.code !== 0 && c.result.code !== null) {
+          lines.push(`  - 退出码：${c.result.code}`)
+        }
+      }
+    }
+  }
+  return lines.join('\n')
+}
+
 function readJson<T>(file: string, fallback: T): T {
   try {
     if (fs.existsSync(file)) {

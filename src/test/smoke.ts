@@ -11,7 +11,7 @@ import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, reads
 import { taintRequiresConfirmation, hasCommandBlockRemnants, isCleanForLlm } from '../main/ai/taint'
 import { loadAttackRules, matchAttackRules, isAttackRulesReady } from '../main/ai/attackRules'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from '../main/ai/tools'
-import { ConversationStore, CONVERSATION_RETENTION_MS } from '../main/ai/conversationStore'
+import { ConversationStore, CONVERSATION_RETENTION_MS, buildAuditLog } from '../main/ai/conversationStore'
 import { AiClient } from '../main/ai/client'
 import { shouldSearch, extractSearchKeyword, extractWebResults } from '../main/search/baiduSearch'
 import {
@@ -1050,6 +1050,30 @@ async function run(): Promise<number> {
       // clear 清空
       conv2.clear(key)
       assert('clear 后对话清空', conv2.loadConversation(key) === null)
+      // 导出日志 buildAuditLog：包含对话、命令状态、风险与结果
+      const log = buildAuditLog(
+        'audit-profile',
+        [
+          { role: 'user', content: '看下磁盘' },
+          { role: 'assistant', content: '用 df -h 查看' }
+        ],
+        [
+          {
+            commandId: 'c1',
+            messageId: 'm1',
+            command: 'df -h',
+            risk: 'safe',
+            status: 'done',
+            executedAt: Date.now(),
+            result: { code: 0, stdout: 'Filesystem\n/dev', stderr: '' }
+          }
+        ]
+      )
+      assert('导出日志含对话', log.includes('看下磁盘') && log.includes('df -h 查看'))
+      assert('导出日志含命令状态/风险', log.includes('已执行') && log.includes('只读'))
+      assert('导出日志含执行结果', log.includes('/dev'))
+      assert('导出日志含命令文本', log.includes('df -h'))
+      assert('导出日志跳过 system', !log.includes('system-prompt'))
       fs.rmSync(convDir, { recursive: true, force: true })
     }
 

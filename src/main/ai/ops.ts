@@ -15,7 +15,7 @@ import { AiClient, estimateMessagesTokens, type ChatMessage, type ChatTool } fro
 import { matchAttackRules } from './attackRules'
 import { taintRequiresConfirmation } from './taint'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools, getReadOnlyToolCommand } from './tools'
-import { ConversationStore, commandEntryFromProposal } from './conversationStore'
+import { ConversationStore, commandEntryFromProposal, buildAuditLog } from './conversationStore'
 import { shellQuote } from '../ssh/connection'
 import type { Store } from '../core/store'
 import type { SessionManager } from '../ssh/manager'
@@ -1880,5 +1880,16 @@ ${report}
       history: saved ? saved.messages.map((m) => ({ role: m.role, content: m.content })) : [],
       commandHistory: this.conversationStore.loadCommandHistory(profileKey)
     }
+  }
+
+  /**
+   * 生成该主机的对话 + 命令审计日志（Markdown 文本），供「导出日志」落盘。
+   * 基于持久层数据，保证即使渲染层状态不完整也能导出完整保留的日志。
+   */
+  exportLog(profileKey: string): string {
+    const saved = this.conversationStore.loadConversation(profileKey)
+    const history = saved ? saved.messages : []
+    const commandHistory = this.conversationStore.loadCommandHistory(profileKey)
+    return buildAuditLog(profileKey, history, commandHistory)
   }
 }

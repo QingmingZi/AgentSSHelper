@@ -114,6 +114,8 @@ export interface SshHelperApi {
         error?: string
       }>
     }>
+    /** 生成对话 + 命令审计日志（Markdown）供导出 */
+    exportLog: (profileKey: string) => Promise<string>
   }
   system: {
     pickDirectory(): Promise<string | null>

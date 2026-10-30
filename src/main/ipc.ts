@@ -433,6 +433,11 @@ export function registerIpc(store: Store, sessions: SessionManager, ai: AiOpsSer
     return ai.loadConversation(profileKey)
   })
 
+  // 生成对话 + 命令审计日志（Markdown），供「导出日志」落盘
+  ipcMain.handle('ai:exportLog', (_e, profileKey: string) => {
+    return ai.exportLog(profileKey)
+  })
+
   ipcMain.handle('ai:stop', (_e, sessionId: string) => {
     ai.stop(sessionId)
     return true

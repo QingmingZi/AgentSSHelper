@@ -118,7 +118,9 @@ const api = {
       ipcRenderer.invoke('ai:stopCommand', commandId),
     /** 打开应用后按主机加载已保留的对话与命令历史（3 天内） */
     loadConversation: (profileKey: string): Promise<unknown> =>
-      ipcRenderer.invoke('ai:loadConversation', profileKey)
+      ipcRenderer.invoke('ai:loadConversation', profileKey),
+    /** 生成对话 + 命令审计日志（Markdown） */
+    exportLog: (profileKey: string): Promise<string> => ipcRenderer.invoke('ai:exportLog', profileKey)
   },
 
   system: {

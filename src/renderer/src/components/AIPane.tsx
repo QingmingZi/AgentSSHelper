@@ -688,6 +688,30 @@ export default function AIPane({
   }, [messages, cards, cardsByMessage, modelName, sessionId, onToast])
 
   /**
+   * 导出日志：基于主进程持久化的对话 + 命令审计记录（3 天内）生成 Markdown 日志并落盘。
+   * 与「导出对话」的区别：这里以数据为准，服务端持久层完整保留的日志即使重启也会导出。
+   */
+  const exportLogFile = useCallback(async (): Promise<void> => {
+    try {
+      const content = await api.ai.exportLog(profileKey)
+      const now = new Date()
+      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
+        now.getDate()
+      ).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(
+        now.getMinutes()
+      ).padStart(2, '0')}`
+      const safeKey = profileKey.replace(/[\\/:*?"<>|]/g, '_') || 'log'
+      const filePath = await api.system.exportConversation({
+        content,
+        defaultPath: `运维日志-${safeKey}-${stamp}.md`
+      })
+      if (filePath) onToast('info', `日志已导出：${filePath}`)
+    } catch (err) {
+      onToast('error', err instanceof Error ? err.message : String(err))
+    }
+  }, [profileKey, onToast])
+
+  /**
    * 长时命令（如 yum update）的实时输出框自动滚动到最新一行，
    * 让更新内容随进度自动呈现，无需手动下拖。
    * 仅当仍有 running 卡片且其 liveOutput 实际变化时才触发。
@@ -928,6 +952,13 @@ export default function AIPane({
           disabled={messages.length === 0}
         >
           导出对话
+        </button>
+        <button
+          className="btn tiny ghost"
+          title="导出该主机保留的 AI 运维对话与命令审计日志（3 天内）"
+          onClick={() => void exportLogFile()}
+        >
+          导出日志
         </button>
         <button className="btn tiny ghost" onClick={() => void stop()} disabled={!busy}>
           停止
