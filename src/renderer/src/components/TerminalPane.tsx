@@ -64,6 +64,14 @@ export default function TerminalPane({ sessionId, visible }: TerminalPaneProps):
     if (text) api.ssh.shellInput(sessionId, text)
   }
 
+  // 工具栏按钮动作：先让按钮失焦、把键盘交还终端，再执行操作。
+  // 否则按钮持有焦点时，回车/空格会再次触发点击（复制/黏贴重复执行、按钮呈高亮）。
+  const toolbarBlur = (e: MouseEvent<HTMLElement>, run: () => void): void => {
+    e.currentTarget.blur()
+    if (termRef.current) termRef.current.focus()
+    run()
+  }
+
   const openCtxMenu = (e: MouseEvent<HTMLDivElement>): void => {
     if (e.type === 'contextmenu') e.preventDefault()
     setCtxMenu({ x: e.clientX, y: e.clientY })
@@ -199,13 +207,23 @@ export default function TerminalPane({ sessionId, visible }: TerminalPaneProps):
         <div className="spacer" />
         {error && <span className="error-text">{error}</span>}
         {!error && <span className="hint">{ready ? '已连接' : '正在建立会话…'}</span>}
-        <button className="btn tiny ghost" onClick={() => void copySelection()} title="复制选中文本 (Ctrl+Shift+C)">
+        <button
+          className="btn tiny ghost"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => toolbarBlur(e, () => void copySelection())}
+          title="复制选中文本 (Ctrl+Shift+C)"
+        >
           {copied ? '已复制' : '复制'}
         </button>
-        <button className="btn tiny ghost" onClick={() => void pasteClipboard()} title="从系统剪贴板黏贴 (Ctrl+Shift+V)">
+        <button
+          className="btn tiny ghost"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => toolbarBlur(e, () => void pasteClipboard())}
+          title="从系统剪贴板黏贴 (Ctrl+Shift+V)"
+        >
           黏贴
         </button>
-        <button className="btn tiny ghost" onClick={clear}>
+        <button className="btn tiny ghost" onMouseDown={(e) => e.preventDefault()} onClick={(e) => toolbarBlur(e, clear)}>
           清屏
         </button>
       </div>

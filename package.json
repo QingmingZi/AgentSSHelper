@@ -1,6 +1,6 @@
 {
   "name": "agentsshelper",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "AgentSSHelper - SSH 远程管理 / SCP 文件传输 / AI 运维桌面工具",
   "author": "AgentSSHelper",
   "main": "./out/main/index.js",
