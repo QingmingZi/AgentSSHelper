@@ -130,8 +130,8 @@ export function executeReadFile(
   deps: {
     readFile: (p: string) => Promise<string>
     stat: (p: string) => Promise<{ size: number }>
-    /** 敏感路径判定；命中即拒绝（默认总是放行，由调用方传真实守卫） */
-    isSensitive?: (p: string) => boolean
+    /** 敏感路径判定；必填。命中即拒绝（审计 R4 ④：默认放行是可选守卫，改为必填杜绝漏传） */
+    isSensitive: (p: string) => boolean
   }
 ): Promise<{ ok: boolean; name: string; output?: string; error?: string }> {
   const MAX_BYTES = 256 * 1024
@@ -139,7 +139,10 @@ export function executeReadFile(
   return (async () => {
     const p = String(pathArg ?? '').trim()
     if (!p) return { ok: false, name: 'read_file', error: '未提供文件路径' }
-    if (isSensitive && isSensitive(p)) {
+    if (!isSensitive) {
+      return { ok: false, name: 'read_file', error: '敏感路径守卫未配置，已拒绝读取' }
+    }
+    if (isSensitive(p)) {
       return { ok: false, name: 'read_file', error: '目标路径命中敏感文件守卫，已拒绝读取（凭据/隐私文件）' }
     }
     try {

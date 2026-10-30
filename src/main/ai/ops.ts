@@ -14,6 +14,7 @@ import { AiClient, estimateMessagesTokens, type ChatMessage, type ChatTool } fro
 import { matchAttackRules } from './attackRules'
 import { taintRequiresConfirmation } from './taint'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from './tools'
+import { shellQuote } from '../ssh/connection'
 import type { Store } from '../core/store'
 import type { SessionManager } from '../ssh/manager'
 import { shouldSearch } from '../search/baiduSearch'
@@ -614,6 +615,25 @@ export function deriveSearchFilters(query: string): {
     }
   }
   return out
+}
+
+/**
+ * read_file 路径白名单式预检（审计 R4 ③/② 纵深防御）：
+ * 拒绝含 shell 元字符 / 换行 / 目录穿越的路径，杜绝把任意模型原话拼进远端 shell。
+ * 即便下方用 shellQuote 单引号包裹，也先在此拦截明显恶意的字符串。
+ * 只允许字母数字、空格、`/` `.` `_` `-` `:` `@` `~` `+` `%` （常见路径字符）。
+ * 纯启发式、可测试；判定失败一律拒绝，绝不放松。
+ */
+export function isSafeReadPath(pathArg: string): boolean {
+  if (!pathArg || pathArg.length === 0) return false
+  const p = String(pathArg)
+  if (p.includes('\n') || p.includes('\r')) return false
+  // 拒绝命令替换/变量展开/引号/重定向/管道/逻辑/分号/反斜杠等 shell 元字符。
+  // 用白名单取反替代逐个枚举，杜绝漏字符。
+  if (!/^[A-Za-z0-9 _.\-:@/~+=%]+$/.test(p)) return false
+  // 拒绝目录穿越（路径段两端的裸 `..`，含 `a/../b`）
+  if (/(^|\/)\.\.(\/|$)/.test(p)) return false
+  return true
 }
 
 /** 命令块的各种结束标记：标准 `:::`，或模型偶尔自学的 EOF / EOT */
@@ -1582,17 +1602,26 @@ ${report}
       if (readsSensitivePath(p)) {
         return { ok: false, name: 'read_file', error: '目标路径命中敏感文件守卫，已拒绝读取（凭据/隐私文件）' }
       }
+      // 路径必须不含 shell 元字符与目录穿越：即使下方先 shellQuote，也做白名单式
+      // 前置拒绝，杜绝把任意模型原话拼进远端 shell（审计 R4 免审批 RCE 修复）。
+      if (!isSafeReadPath(p)) {
+        return { ok: false, name: 'read_file', error: '路径含不被允许的字符（shell 元字符/换行/..），已拒绝读取' }
+      }
       const result = await executeReadFile(p, {
         readFile: async (pathArg) => {
-          const r = await session.exec(`cat -- "${pathArg}" 2>/dev/null || true`, { timeout: 12_000, cwd: session.profile.defaultDirectory })
+          // shellQuote 自带单引号包裹（修复 R4：双引号挡不住 $()/反引号命令替换）——
+          // 这里不要再自行加引号，直接拼单引号包裹的安全参数。
+          const pArg = pathArg
+          const r = await session.exec(`cat -- ${shellQuote(pArg)} 2>/dev/null || true`, { timeout: 12_000, cwd: session.profile.defaultDirectory })
           return [r.stdout, r.stderr].filter(Boolean).join('\n')
         },
         stat: async (pathArg) => {
-          const r = await session.exec(`stat -c %s -- "${pathArg}" 2>/dev/null || echo 0`, { timeout: 12_000, cwd: session.profile.defaultDirectory })
+          const r = await session.exec(`stat -c %s -- ${shellQuote(pathArg)} 2>/dev/null || echo 0`, { timeout: 12_000, cwd: session.profile.defaultDirectory })
           const size = parseInt((r.stdout || '0').trim(), 10)
           return { size: Number.isFinite(size) ? size : 0 }
         },
-        isSensitive: readsSensitivePath
+        // isSensitive 改为必填参数：杜绝调用点漏传导致守卫形同虚设（审计 R4 ④）
+        isSensitive: (pathArg) => readsSensitivePath(pathArg)
       })
       if (result.ok && result.output) {
         result.output = cleanRemoteOutput(result.output)

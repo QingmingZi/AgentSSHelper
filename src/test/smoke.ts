@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { Store } from '../main/core/store'
 import { SessionManager } from '../main/ssh/manager'
 import { SystemUsageMonitor } from '../main/ssh/monitor'
-import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger, deriveSearchFilters } from '../main/ai/ops'
+import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger, deriveSearchFilters, isSafeReadPath } from '../main/ai/ops'
 import { taintRequiresConfirmation, hasCommandBlockRemnants, isCleanForLlm } from '../main/ai/taint'
 import { loadAttackRules, matchAttackRules, isAttackRulesReady } from '../main/ai/attackRules'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from '../main/ai/tools'
@@ -703,6 +703,27 @@ async function run(): Promise<number> {
       isSensitive: (p) => /etc\/shadow/.test(p)
     })
     assert('工具-read_file-普通文件放行', safeRead.ok === true && (safeRead.output ?? '').includes('PRETTY_NAME'), JSON.stringify(safeRead))
+
+    // ---- 审计 R4：read_file 免审批 RCE 回归（shellQuote + 路径白名单预检）----
+    assert('R4|isSafeReadPath 允许正常绝对路径', isSafeReadPath('/etc/os-release') === true)
+    assert('R4|isSafeReadPath 允许相对+空格路径', isSafeReadPath('/home/user/My File.cfg') === true)
+    assert('R4|isSafeReadPath 拒绝 $( ) 命令替换', isSafeReadPath('$(id > /tmp/inj_proof.txt)') === false)
+    assert('R4|isSafeReadPath 拒绝反引号', isSafeReadPath('`id`') === false)
+    assert('R4|isSafeReadPath 拒绝引号逃逸', isSafeReadPath('"; id #') === false)
+    assert('R4|isSafeReadPath 拒绝换行', isSafeReadPath('/etc/passwd\n$(id)') === false)
+    assert('R4|isSafeReadPath 拒绝目录穿越', isSafeReadPath('/etc/../etc/shadow') === false)
+    assert('R4|isSafeReadPath 拒绝空路径', isSafeReadPath('') === false)
+    // shellQuote 压缩命令替换：拼命令后本地执行，注入不应产生 side effect
+    {
+      const execFile = require('node:child_process').execFileSync
+      const shellQuoteLocal = (input: string) => `'${String(input).replace(/'/g, `'\\''`)}'`
+      const payload = '$(echo INJECTED > /tmp/inj_proof_smoke.txt)'
+      try {
+        execFile('sh', ['-c', `cat -- ${shellQuoteLocal(payload)} 2>/dev/null || true`])
+      } catch { /* stat 目标不存在，无害 */ }
+      const fs = require('node:fs')
+      assert('R4|shellQuote 压缩命令替换不落盘', !fs.existsSync('/tmp/inj_proof_smoke.txt'))
+    }
 
     // --------------------------------------------------- 命令提案解析
     const reply = `先看下磁盘。\n:::command\ndf -h\n:::\n再看看内存。\n:::command\nfree -m\n:::`
