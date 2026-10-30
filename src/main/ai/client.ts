@@ -5,10 +5,33 @@ export interface ChatMessage {
   content: string
 }
 
+/** OpenAI 风格的函数定义（原生 function calling） */
+export interface ChatTool {
+  type: 'function'
+  function: {
+    name: string
+    description?: string
+    parameters: Record<string, unknown>
+  }
+}
+
+/** 模型发起的函数调用（增量/完整） */
+export interface ChatToolCall {
+  index: number
+  id?: string
+  name?: string
+  arguments?: string
+}
+
+/** 流式回调：可在 onDelta 之外收到“函数调用待执行”的信号 */
 export interface AiStreamHandlers {
+  /** 文本增量 */
   onDelta: (text: string) => void
   /** 首个 token 到达时回调，参数为耗时毫秒 */
   onFirstToken?: (latencyMs: number) => void
+  /** 收到一个 tool-call 的增量参数片段 */
+  onToolCallDelta?: (call: ChatToolCall) => void
+  /** 全部流结束（达成完整 tool_call 时由解析层校验/汇总） */
   onDone: (fullText: string, metrics: AiMetrics) => void
   onError: (err: Error) => void
 }
@@ -283,7 +306,12 @@ export class AiClient {
   }
 
   /** 流式对话，同时统计首字延迟、输出速度与上下文用量 */
-  async chat(messages: ChatMessage[], handlers: AiStreamHandlers, signal?: AbortSignal): Promise<void> {
+  async chat(
+    messages: ChatMessage[],
+    handlers: AiStreamHandlers,
+    signal?: AbortSignal,
+    tools?: ChatTool[]
+  ): Promise<void> {
     if (this.urlError) {
       handlers.onError(new Error(this.urlError))
       return
@@ -321,7 +349,7 @@ export class AiClient {
     }
 
     try {
-      const body = {
+      const body: Record<string, unknown> = {
         model: this.config.model,
         messages,
         temperature: this.config.temperature,
@@ -330,21 +358,35 @@ export class AiClient {
         // 让 OpenAI 兼容服务在流末尾带回 usage，用于精确统计 token
         stream_options: { include_usage: true }
       }
+      if (tools && tools.length > 0) {
+        body.tools = tools
+        // 仅在模型兼容 / 仍能回退文本时才协作，因此不强设 tool_choice=force
+        body.tool_choice = 'auto'
+      }
 
-      const send = (withUsage: boolean): Promise<Response> =>
-        fetch(this.endpoint, {
+      const send = (mode: 'full' | 'noUsage' | 'noTools' | 'bare'): Promise<Response> => {
+        const b = { ...body } as Record<string, unknown>
+        if (mode === 'noUsage') b.stream_options = undefined
+        if (mode === 'noTools' || mode === 'bare') {
+          delete b.tools
+          delete b.tool_choice
+        }
+        if (mode === 'bare') b.stream_options = undefined
+        return fetch(this.endpoint, {
           method: 'POST',
           headers: this.buildHeaders(),
           signal,
-          body: JSON.stringify(withUsage ? body : { ...body, stream_options: undefined })
+          body: JSON.stringify(b)
         })
+      }
 
-      let response = await send(true)
+      let response = await send('full')
       if (!response.ok && (response.status === 400 || response.status === 422)) {
         const text = await response.text()
-        // 部分兼容服务不认识 stream_options，去掉后重试一次
         if (/stream_options|unknown|unrecognized|unsupported|invalid/i.test(text)) {
-          response = await send(false)
+          // 服务不认识 stream_options / tools，退回不带这些字段的方式
+          const hasTools = tools && tools.length > 0
+          response = await send(hasTools ? 'noTools' : 'noUsage')
         } else {
           throw new Error(`HTTP ${response.status} ${response.statusText}: ${sanitizeErrorBody(text)}`)
         }
@@ -376,7 +418,18 @@ export class AiClient {
             return
           }
           let parsed: {
-            choices?: Array<{ delta?: { content?: string }; message?: { content?: string }; finish_reason?: string | null }>
+            choices?: Array<{
+              delta?: {
+                content?: string
+                tool_calls?: Array<{
+                  index?: number
+                  id?: string
+                  function?: { name?: string; arguments?: string }
+                }>
+              }
+              message?: { content?: string; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> }
+              finish_reason?: string | null
+            }>
             usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
             error?: { message?: string }
           }
@@ -401,6 +454,18 @@ export class AiClient {
             // 先发 delta 再发首字指标：渲染层先建立流式消息，再挂上延迟数字
             handlers.onDelta(delta)
             if (isFirst) handlers.onFirstToken?.(firstTokenAt! - startedAt)
+          }
+          // 原生 function calling：模型发起工具调用（增量式，arguments 逐段累积）
+          const toolCalls =
+            choice?.delta?.tool_calls ?? choice?.message?.tool_calls
+          if (toolCalls && toolCalls.length > 0) {
+            const first = toolCalls[0]
+            handlers.onToolCallDelta?.({
+              index: (first as { index?: number }).index ?? 0,
+              id: (first as { id?: string }).id,
+              name: first.function?.name,
+              arguments: first.function?.arguments
+            })
           }
         }
       }

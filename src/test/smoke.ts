@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { Store } from '../main/core/store'
 import { SessionManager } from '../main/ssh/manager'
 import { SystemUsageMonitor } from '../main/ssh/monitor'
-import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger } from '../main/ai/ops'
+import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger, deriveSearchFilters } from '../main/ai/ops'
 import { taintRequiresConfirmation, hasCommandBlockRemnants, isCleanForLlm } from '../main/ai/taint'
 import { loadAttackRules, matchAttackRules, isAttackRulesReady } from '../main/ai/attackRules'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from '../main/ai/tools'
@@ -584,6 +584,40 @@ async function run(): Promise<number> {
     // 密钥最后 4 位展示用 extractSearchKeyword / shouldSearch 不变
     assert('extractSearchKeyword 提炼关键词', extractSearchKeyword('nginx 最新版本 怎么配置') !== '')
     assert('本机问句不应触发搜索', shouldSearch('目前这款系统版本是多少') === false)
+
+    // ---- 百度高级过滤参数（审计报告 ①：recency / resource_type / site）----
+    assert('过滤-CVE→时效过滤', deriveSearchFilters('CVE-2024-3094 是什么')?.recency === 'month', JSON.stringify(deriveSearchFilters('CVE-2024-3094 是什么')))
+    assert('过滤-补丁→时效过滤', deriveSearchFilters('怎么打这个漏洞的补丁')?.recency === 'month')
+    assert('过滤-docker→官网限定', deriveSearchFilters('docker 网络怎么配')?.site === 'site:docs.docker.com')
+    assert('过滤-nginx→官网限定', deriveSearchFilters('nginx.conf 优化')?.site === 'site:nginx.org')
+    assert('过滤-配置→官方文档', deriveSearchFilters('nginx.conf 最佳实践')?.resourceType === 'official_document')
+    assert('过滤-普通→不强加', (() => { const f = deriveSearchFilters('今天天气'); return f.recency == null && f.site == null && f.resourceType == null })(), JSON.stringify(deriveSearchFilters('今天天气')))
+    // Baidu provider 请求体应透传高级过滤参数
+    {
+      const original = globalThis.fetch
+      let capturedBody: string | null = null
+      globalThis.fetch = (async (_input: any, init?: any) => {
+        capturedBody = init?.body ?? null
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ references: [{ title: 't', content: 'c', url: 'https://x' }] }),
+          text: async () => '',
+          headers: new Headers(),
+          statusText: 'OK'
+        } as Response
+      }) as typeof fetch
+      try {
+        const p = new BaiduSearchProvider('test-key')
+        await p.search('加固 nginx', { topK: 2, recency: 'month', resourceType: 'official_document', site: 'site:nginx.org' })
+        const body = capturedBody ? JSON.parse(capturedBody) : {}
+        assert('百度请求体含 search_recency_filter', body.search_recency_filter === 'month', capturedBody ?? '')
+        assert('百度请求体含 resource_type_filter', body.resource_type_filter === 'official_document', capturedBody ?? '')
+        assert('百度请求体含 search_filter(site)', body.search_filter === 'site:nginx.org', capturedBody ?? '')
+      } finally {
+        globalThis.fetch = original
+      }
+    }
 
     // ------------------------------------------------ 阶段2：只读工具面 + AST 加严
     // AST 初始化在 electron 主进程内执行（web-tree-sitter wasm）；加载失败仅为不可用，不抛。

@@ -99,12 +99,17 @@ export class BaiduSearchProvider implements SearchProvider {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`
         },
-        // 百度 web_search 可选参数：时新性/类型过滤按需透传，top_k 控制条数
+        // 百度 web_search 可选参数：时新性/类型过滤按需透传，top_k 控制条数；
+        // 高级过滤（v3 动作 #4 补齐）：search_recency_filter 时效、resource_type_filter
+        // 来源类型、search_filter（含 site 限定）。
         body: JSON.stringify({
           messages: [{ role: 'user', content: query }],
           search_source: 'baidu_search_v2',
           ...(opts.freshness ? { freshness: opts.freshness } : {}),
-          ...(opts.topK ? { top_k: opts.topK } : {})
+          ...(opts.topK ? { top_k: opts.topK } : {}),
+          ...(opts.recency ? { search_recency_filter: opts.recency } : {}),
+          ...(opts.resourceType ? { resource_type_filter: opts.resourceType } : {}),
+          ...(opts.site ? { search_filter: opts.site } : {})
         }),
         signal: AbortSignal.timeout(resolveTimeout())
       })

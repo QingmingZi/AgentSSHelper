@@ -10,7 +10,7 @@ import type {
 } from '@shared/types'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { AiClient, estimateMessagesTokens, type ChatMessage } from './client'
+import { AiClient, estimateMessagesTokens, type ChatMessage, type ChatTool } from './client'
 import { matchAttackRules } from './attackRules'
 import { taintRequiresConfirmation } from './taint'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from './tools'
@@ -552,12 +552,68 @@ export function classifyRiskKind(command: string, risk: CommandRisk): RiskKind {
   // 调用解释器直接执行字符串
   if (/\b(bash|sh|zsh|python|perl|ruby)\s+-c\b/i.test(command)) return 'dangerous'
   // AST 已就绪且检出台危险**命令名**（嵌套的 sudo/su/eval/source 等）→ dangerous；
-  // 命令/进程替换（$(...)、<(...)）仅属“需确认的未知”，不视为 privesc/code-exec 级危险。
+  // 命令/进程替换（$(...)、<(...)）仅属"需确认的未知"，不视为 privesc/code-exec 级危险。
   if (isAstReady()) {
     const signals = analyzeAstDanger(command)
     if (signals.some((s) => /危险命令名/.test(s))) return 'dangerous'
   }
   return 'unknown'
+}
+
+/**
+ * 按检索意图派生百度高级过滤参数（v3 动作 #4 补齐；审计报告①）。
+ * 纯启发式、可缺席、不强加（不匹配则全部留空，交给 provider 默认行为）：
+ *  - recency：时效性敏感（CVE/漏洞/补丁/最新版本/EOL/升级/已知问题）→ 优先最近结果；
+ *  - resourceType：运维配置/官方文档类问题 → 偏向官方文档；
+ *  - site：明确了特定软件/云厂商时，优先其官方域，压制论坛灌水。
+ * 返回给 search 透传；返回值仅用于提升检索质量，不影响安全性（搜索本就不可信）。
+ */
+export function deriveSearchFilters(query: string): {
+  recency?: string
+  resourceType?: string
+  site?: string
+} {
+  const q = query.trim() || ''
+  const out: { recency?: string; resourceType?: string; site?: string } = {}
+
+  // 时效性最敏感的一类：漏洞/补丁/最新版/EOL/升级/回归/已知问题（CJK 不用 \b，边界不可靠）
+  if (
+    /\bCVE[- ]?\d{4}\b|\bpatch\b|\bEOL\b|\bexploit\b|\bvuln\b/i.test(q) ||
+    /漏洞|补丁|最新版本|升级到|升级|killed by signal|回归|回归问题|不再支持|已过期|过期支持/.test(q)
+  ) {
+    out.recency = 'month'
+  }
+
+  // 运维配置 / 官方文档 / 手册类：偏向官方文档，压住论坛灌水
+  if (
+    /\bdockerfile\b|\bsystemd\b|\bnginx\.conf\b|\bman\s+\w+\b|\bbest practice\b|\b参数说明\b/i.test(q) ||
+    /配置|官方|文档|手册|怎么配|如何配|最佳实践/.test(q)
+  ) {
+    out.resourceType = 'official_document'
+  }
+
+  // 明确了具体软件/云厂商时，优先其官方域
+  const SITES: Array<[RegExp, string]> = [
+    [/\baliyun|阿里云\b/i, 'site:help.aliyun.com'],
+    [/\btencent|腾讯云\b/i, 'site:cloud.tencent.com'],
+    [/\bhuawei|华为云\b/i, 'site:support.huaweicloud.com'],
+    [/\bnginx\b/i, 'site:nginx.org'],
+    [/\bsystemd\b/i, 'site:systemd.io'],
+    [/\bdocker\b/i, 'site:docs.docker.com'],
+    [/\bkubernetes|k8s\b/i, 'site:kubernetes.io'],
+    [/\bpostgresql|postgres\b/i, 'site:postgresql.org'],
+    [/\bmysql\b/i, 'site:dev.mysql.com'],
+    [/\bredis\b/i, 'site:redis.io'],
+    [/\bgitlab\b/i, 'site:docs.gitlab.com'],
+    [/\bjenkins\b/i, 'site:www.jenkins.io']
+  ]
+  for (const [re, site] of SITES) {
+    if (re.test(q)) {
+      out.site = site
+      break
+    }
+  }
+  return out
 }
 
 /** 命令块的各种结束标记：标准 `:::`，或模型偶尔自学的 EOF / EOT */
@@ -842,6 +898,10 @@ export interface ChatOptions {
   onError: (err: Error) => void
   /** 本次请求实际使用了联网搜索结果时回调（参数为搜索关键词） */
   onSearched?: (keyword: string) => void
+  /** 原生 function calling 下只读工具执行结果回调（工具名、参数、输出） */
+  onToolResult?: (result: { name: string; arguments: string; output?: string; error?: string }) => void
+  /** 是否附带只读工具面供模型原生调用；缺省在系统提示已声明时启用 */
+  enableTools?: boolean
 }
 
 export class AiOpsService extends EventEmitter {
@@ -1176,9 +1236,12 @@ export class AiOpsService extends EventEmitter {
     if (config.searchEnabled) {
       const manager = await this.getSearchManager()
       if (manager && shouldSearch(userMessage) && this.canSearch(sessionId)) {
+        // 按检索意图派生百度高级过滤（时效/类型/官网站点），提升检索质量
+        const filters = deriveSearchFilters(userMessage)
         const result = await manager.search(userMessage, {
           topK: DEFAULT_TOP_K,
-          maxSnippetLen: DEFAULT_SNIPPET_LEN
+          maxSnippetLen: DEFAULT_SNIPPET_LEN,
+          ...filters
         })
         if (result) {
           this.noteSearch(sessionId)
@@ -1212,22 +1275,91 @@ export class AiOpsService extends EventEmitter {
     const controller = new AbortController()
     this.aborters.set(sessionId, controller)
 
-    await (await this.client()).chat(requestMessages, {
-      onDelta: options.onDelta,
-      onFirstToken: options.onFirstToken,
-      onDone: (full, metrics) => {
-        history.push({ role: 'assistant', content: full })
-        this.truncate(history)
-        this.aborters.delete(sessionId)
-        // 用户点了「停止」：半截回复里解析出的命令不再进入审批 / 执行流程
-        if (!controller.signal.aborted) options.onCommand(extractCommands(full))
-        options.onDone(full, metrics)
+    const client = await this.client()
+    // 只读工具面以 OpenAI 原生 function calling 形式提供给模型（未显式关闭时启用）
+    const tools: ChatTool[] | undefined =
+      options.enableTools !== false ? ((this.readOnlyToolsAsOpenAi() as ChatTool[])) : undefined
+
+    // 主轮：流式回复 + 收集模型发起的原生 tool call
+    const toolCallAcc: { name?: string; id?: string; arguments: string } = { arguments: '' }
+    await client.chat(
+      requestMessages,
+      {
+        onDelta: options.onDelta,
+        onFirstToken: options.onFirstToken,
+        onToolCallDelta: (call) => {
+          if (call.name) toolCallAcc.name = call.name
+          if (call.id) toolCallAcc.id = call.id
+          if (call.arguments) toolCallAcc.arguments += call.arguments
+        },
+        onDone: async (full, metrics) => {
+          // 用户点了「停止」：半截回复里解析出的命令不再进入审批 / 执行流程
+          const aborted = controller.signal.aborted
+          if (!aborted) options.onCommand(extractCommands(full))
+
+          // 原生 function calling：模型请求调用只读工具 → 执行并回传一档结果
+          const toolName = toolCallAcc.name
+          if (!aborted && toolName && this.isKnownReadOnlyTool(toolName)) {
+            try {
+              const toolResult = await this.runNativeTool(sessionId, toolName, toolCallAcc.arguments)
+              options.onToolResult?.(toolResult)
+              // 第二档：把工具结果作为 user/tool 内容追加，让模型基于真实只读信息给出最终回答
+              const followUp = [
+                ...requestMessages,
+                { role: 'assistant' as const, content: '' },
+                {
+                  role: 'user' as const,
+                  content:
+                    toolResult.output != null
+                      ? `<tool_result name="${toolName}">\n${sanitizeUntrusted(toolResult.output, 8000)}\n</tool_result>` +
+                        `\n请基于以上只读工具的真实输出继续回答，并以命令块形式给出后续必要命令。`
+                      : `<tool_result name="${toolName}">\n[执行失败] ${toolResult.error ?? '无输出'}\n</tool_result>`
+                }
+              ]
+              await new Promise<void>((resolve) => {
+                void client.chat(
+                  followUp,
+                  {
+                    onDelta: options.onDelta,
+                    onDone: (finalFull) => {
+                      history.push({ role: 'user', content: userMessage })
+                      history.push({ role: 'assistant', content: finalFull })
+                      this.truncate(history)
+                      this.aborters.delete(sessionId)
+                      options.onCommand(extractCommands(finalFull))
+                      options.onDone(finalFull, metrics)
+                      resolve()
+                    },
+                    onError: (err) => {
+                      this.aborters.delete(sessionId)
+                      options.onError(err)
+                      resolve()
+                    }
+                  },
+                  controller.signal
+                )
+              })
+              return
+            } catch (err) {
+              options.onError(err instanceof Error ? err : new Error(String(err)))
+              this.aborters.delete(sessionId)
+              return
+            }
+          }
+
+          history.push({ role: 'assistant', content: full })
+          this.truncate(history)
+          this.aborters.delete(sessionId)
+          options.onDone(full, metrics)
+        },
+        onError: (err) => {
+          this.aborters.delete(sessionId)
+          options.onError(err)
+        }
       },
-      onError: (err) => {
-        this.aborters.delete(sessionId)
-        options.onError(err)
-      }
-    }, controller.signal)
+      controller.signal,
+      tools
+    )
   }
 
   /**
@@ -1476,6 +1608,63 @@ ${report}
   /** 当前会话可用只读工具清单（能力协商信息，供提示词/IPC） */
   listReadOnlyTools(): Array<{ name: string; description: string }> {
     return listReadOnlyTools()
+  }
+
+  /** 把只读工具面转成 OpenAI 原生 function calling 的 tools 声明 */
+  private readOnlyToolsAsOpenAi(): ChatTool[] {
+    const tools: ChatTool[] = listReadOnlyTools().map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: { type: 'object', properties: {}, additionalProperties: false }
+      }
+    }))
+    // read_file 走敏感路径守卫，仅允许在明确路径时由模型请求
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: '读取指定文件文本（命中敏感路径自动拒绝，含凭据/隐私文件）',
+        parameters: {
+          type: 'object',
+          properties: { path: { type: 'string', description: '要读取的文件绝对路径' } },
+          required: ['path'],
+          additionalProperties: false
+        }
+      }
+    })
+    return tools
+  }
+
+  /** 该工具名是否属于只读工具面白名单（含 read_file 特例） */
+  private isKnownReadOnlyTool(name: string): boolean {
+    return name === 'read_file' || listReadOnlyTools().some((t) => t.name === name)
+  }
+
+  /** 执行原生 tool call（只读），返回脱敏输出 */
+  private async runNativeTool(
+    sessionId: string,
+    name: string,
+    rawArgs: string
+  ): Promise<{ name: string; arguments: string; output?: string; error?: string }> {
+    let args: Record<string, string> = {}
+    if (rawArgs && rawArgs.trim()) {
+      try {
+        const parsed = JSON.parse(rawArgs) as Record<string, string>
+        if (parsed && typeof parsed === 'object') args = parsed
+      } catch {
+        args = {}
+      }
+    }
+    if (name === 'read_file') {
+      const pathArg = (args.path ?? args.file) as string | undefined
+      if (!pathArg) return { name, arguments: rawArgs, error: 'read_file 需要 path 参数' }
+    }
+    const out = await this.runReadOnlyToolForSession(sessionId, name, args)
+    if (out == null) return { name, arguments: rawArgs, error: '工具不可用' }
+    if (!out.ok) return { name, arguments: rawArgs, error: out.error ?? '工具执行失败' }
+    return { name, arguments: rawArgs, output: out.output }
   }
 
   private truncate(history: ChatMessage[]): void {

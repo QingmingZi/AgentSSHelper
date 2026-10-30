@@ -12,6 +12,12 @@ export interface SearchOptions {
   topK: number
   /** 新鲜度窗口，如 '1d' / '1w' / '1m'（按 provider 能力映射，可选） */
   freshness?: string
+  /** 时效性过滤（百度 search_recency_filter）：'day' | 'week' | 'month' | 'year' | 'none' */
+  recency?: string
+  /** 结果类型过滤（百度 resource_type_filter）：官方文档/商用/个人/技术文章等 */
+  resourceType?: string
+  /** 站点限定（百度 search_filter）：只保留指定权威域，如 site:cloud.baidu.com */
+  site?: string
   /** 摘要单条最大字符数 */
   maxSnippetLen: number
 }
