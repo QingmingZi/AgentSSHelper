@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { ReactElement, MouseEvent } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -44,6 +44,37 @@ export default function TerminalPane({ sessionId, visible }: TerminalPaneProps):
   const startedRef = useRef<string | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState('')
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  // 复制选中文本：无选区或会话不可用则忽略
+  const copySelection = async (): Promise<void> => {
+    const term = termRef.current
+    if (!term) return
+    const sel = term.getSelection()
+    if (!sel) return
+    await api.clipboard.writeText(sel)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1200)
+  }
+
+  // 黏贴系统剪贴板到终端输入流
+  const pasteClipboard = async (): Promise<void> => {
+    const text = await api.clipboard.readText()
+    if (text) api.ssh.shellInput(sessionId, text)
+  }
+
+  const openCtxMenu = (e: MouseEvent<HTMLDivElement>): void => {
+    if (e.type === 'contextmenu') e.preventDefault()
+    setCtxMenu({ x: e.clientX, y: e.clientY })
+  }
+
+  const runCtx = (action: 'copy' | 'paste' | 'clear'): void => {
+    setCtxMenu(null)
+    if (action === 'copy') void copySelection()
+    else if (action === 'paste') void pasteClipboard()
+    else clear()
+  }
 
   // 创建终端实例（仅在会话变化时创建，切换标签页不会重建，保留回滚缓冲）
   useEffect(() => {
@@ -69,6 +100,24 @@ export default function TerminalPane({ sessionId, visible }: TerminalPaneProps):
 
     const disposeData = term.onData((data) => {
       api.ssh.shellInput(sessionId, data)
+    })
+
+    // 复制/黏贴快捷键：Ctrl+Shift+C 复制选中、Ctrl+Shift+V 黏贴剪贴板。
+    // 拦截后返回 false，避免 xterm 把组合键发进远端或触发浏览器默认行为。
+    // 故意不用 preventDefault 兜底浏览器，仅精确命中两个组合。
+    term.attachCustomKeyEventHandler((event) => {
+      const k = (event.key || '').toLowerCase()
+      const mod = (event.ctrlKey || event.metaKey) && event.shiftKey
+      if (!mod) return true
+      if (k === 'c') {
+        void copySelection()
+        return false
+      }
+      if (k === 'v') {
+        void pasteClipboard()
+        return false
+      }
+      return true
     })
 
     const offData = api.on('ssh:data', (payload: { sessionId: string; chunk: string }) => {
@@ -150,11 +199,44 @@ export default function TerminalPane({ sessionId, visible }: TerminalPaneProps):
         <div className="spacer" />
         {error && <span className="error-text">{error}</span>}
         {!error && <span className="hint">{ready ? '已连接' : '正在建立会话…'}</span>}
+        <button className="btn tiny ghost" onClick={() => void copySelection()} title="复制选中文本 (Ctrl+Shift+C)">
+          {copied ? '已复制' : '复制'}
+        </button>
+        <button className="btn tiny ghost" onClick={() => void pasteClipboard()} title="从系统剪贴板黏贴 (Ctrl+Shift+V)">
+          黏贴
+        </button>
         <button className="btn tiny ghost" onClick={clear}>
           清屏
         </button>
       </div>
-      <div className="terminal-host" ref={containerRef} />
+      <div
+        className="terminal-host"
+        ref={containerRef}
+        onClick={() => setCtxMenu(null)}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          openCtxMenu(e)
+        }}
+      >
+        {ctxMenu && (
+          <div
+            className="terminal-ctx-menu"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <button className="ctx-item" onClick={() => runCtx('copy')}>
+              复制
+            </button>
+            <button className="ctx-item" onClick={() => runCtx('paste')}>
+              黏贴
+            </button>
+            <div className="ctx-sep" />
+            <button className="ctx-item" onClick={() => runCtx('clear')}>
+              清屏
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

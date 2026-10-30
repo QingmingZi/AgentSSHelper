@@ -443,6 +443,42 @@ button {
   height: 100%;
 }
 
+/* 手工运维终端右键菜单：fixed 定位脱离 overflow:hidden 的宿主，避免被裁剪 */
+.terminal-ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 120px;
+  padding: 4px;
+  background: #171a21;
+  border: 1px solid var(--border, #2a2e39);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-ctx-menu .ctx-item {
+  padding: 6px 12px;
+  text-align: left;
+  font-size: 12px;
+  color: #d5d9e0;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.terminal-ctx-menu .ctx-item:hover {
+  background: #2a2e39;
+  color: #fff;
+}
+
+.terminal-ctx-menu .ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: #2a2e39;
+}
+
 /* ------------------------------------------------------- 文件传输 */
 
 .transfer-body {

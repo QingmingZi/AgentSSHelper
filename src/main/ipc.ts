@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, shell, app } from 'electron'
+import { BrowserWindow, dialog, ipcMain, shell, app, clipboard } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -517,4 +517,16 @@ export function registerIpc(store: Store, sessions: SessionManager, ai: AiOpsSer
   ipcMain.handle('system:homeDir', () => app.getPath('home'))
 
   ipcMain.handle('system:sep', () => path.sep)
+
+  // ----------------------------------------------------------- 剪贴板（手工运维终端复制/黏贴）
+
+  // 写剪贴板：复制终端选中文本用。拒绝过大文本，避免一次塞入海量数据。
+  ipcMain.handle('clipboard:writeText', (_e, text: string) => {
+    const clamped = String(text ?? '').slice(0, 2 * 1024 * 1024)
+    clipboard.writeText(clamped)
+    return true
+  })
+
+  // 读剪贴板：终端黏贴用。返回纯文本；同样截断保护。
+  ipcMain.handle('clipboard:readText', async () => (await clipboard.readText()).slice(0, 2 * 1024 * 1024))
 }

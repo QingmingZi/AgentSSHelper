@@ -111,6 +111,10 @@ export interface SshHelperApi {
     homeDir(): Promise<string>
     exportConversation(payload: { content: string; defaultPath: string }): Promise<string | null>
   }
+  clipboard: {
+    readText(): Promise<string>
+    writeText(text: string): Promise<boolean>
+  }
   on(channel: string, callback: (payload: any) => void): () => void
 }
 

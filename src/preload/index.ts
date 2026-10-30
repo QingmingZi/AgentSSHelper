@@ -130,6 +130,12 @@ const api = {
       ipcRenderer.invoke('conversation:export', payload)
   },
 
+  /** 系统剪贴板访问（手工运维终端复制/黏贴） */
+  clipboard: {
+    readText: (): Promise<string> => ipcRenderer.invoke('clipboard:readText'),
+    writeText: (text: string): Promise<boolean> => ipcRenderer.invoke('clipboard:writeText', text)
+  },
+
   /** 订阅主进程事件，返回取消订阅函数 */
   on: (channel: string, callback: (payload: unknown) => void): Unsubscribe => {
     if (!ALLOWED_CHANNELS.has(channel)) {
