@@ -1,8 +1,11 @@
 import type {
   AiConfig,
   AiConfigView,
+  AttackMatch,
   CommandOutcome,
   CommandResult,
+  CommandRisk,
+  RiskKind,
   HostProfile,
   RemoteFileEntry,
   SshStatus
@@ -93,6 +96,24 @@ export interface SshHelperApi {
     clearHistory(sessionId: string): Promise<{ ok: boolean }>
     stop(sessionId: string): Promise<boolean>
     stopCommand(commandId: string): Promise<boolean>
+    /** 打开应用后按主机加载已保留的对话与命令历史（3 天内） */
+    loadConversation: (
+      profileKey: string
+    ) => Promise<{
+      history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>
+      commandHistory: Array<{
+        commandId: string
+        messageId: string
+        command: string
+        risk: CommandRisk
+        riskKind?: RiskKind
+        attacks?: AttackMatch[]
+        status: string
+        executedAt: number
+        result?: CommandResult
+        error?: string
+      }>
+    }>
   }
   system: {
     pickDirectory(): Promise<string | null>

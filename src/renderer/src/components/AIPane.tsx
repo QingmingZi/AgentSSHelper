@@ -16,6 +16,8 @@ import Markdown from './Markdown'
 
 interface AIPaneProps {
   sessionId: string
+  /** 主机稳定键（profileId / wsl:xxx），用于按主机恢复对话与命令历史 */
+  profileKey: string
   onToast: (level: 'info' | 'error' | 'success', message: string) => void
   /** 面板当前是否可见（不可见时不刷新配置） */
   visible: boolean
@@ -103,6 +105,7 @@ function formatSpeed(tokensPerSecond: number): string {
 
 export default function AIPane({
   sessionId,
+  profileKey,
   onToast,
   visible,
   configVersion,
@@ -167,6 +170,49 @@ export default function AIPane({
     streamingIdRef.current = ''
     searchedIdsRef.current = new Set()
   }, [sessionId])
+
+  // 打开应用 / 切换主机后，按稳定键恢复 3 天内的对话与命令历史，并自动定位到底部。
+  // 系统提示（system）不展示，仅恢复 user/assistant 对话。
+  useEffect(() => {
+    if (!profileKey || profileKey === 'default') return
+    let cancelled = false
+    void api.ai
+      .loadConversation(profileKey)
+      .then((data) => {
+        if (cancelled) return
+        const restoredMessages = (data.history ?? [])
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m, i) => ({
+            id: `restore-${profileKey}-${i}`,
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+            createdAt: Date.now() - (data.history.length - i) * 1000
+          }))
+        setMessages(restoredMessages)
+        const restoredCards = (data.commandHistory ?? []).map((c) => ({
+          commandId: c.commandId,
+          messageId: c.messageId ?? '',
+          command: c.command,
+          risk: c.risk,
+          riskKind: c.riskKind,
+          attacks: c.attacks,
+          status: (c.status === 'pending' ? 'pending' : c.status === 'running' ? 'running' : c.status === 'rejected' ? 'rejected' : c.error ? 'error' : 'done') as CardStatus,
+          result: c.result,
+          error: c.error
+        }))
+        setCards(restoredCards)
+        // 延后到 DOM 就绪后再定位底部
+        requestAnimationFrame(() => {
+          if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
+        })
+      })
+      .catch(() => {
+        /* 恢复失败不应打断面板 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [profileKey])
 
   const scrollToBottom = useCallback(() => {
     const el = listRef.current

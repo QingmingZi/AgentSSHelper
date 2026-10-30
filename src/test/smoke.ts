@@ -11,6 +11,7 @@ import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, reads
 import { taintRequiresConfirmation, hasCommandBlockRemnants, isCleanForLlm } from '../main/ai/taint'
 import { loadAttackRules, matchAttackRules, isAttackRulesReady } from '../main/ai/attackRules'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from '../main/ai/tools'
+import { ConversationStore, CONVERSATION_RETENTION_MS } from '../main/ai/conversationStore'
 import { AiClient } from '../main/ai/client'
 import { shouldSearch, extractSearchKeyword, extractWebResults } from '../main/search/baiduSearch'
 import {
@@ -987,6 +988,70 @@ async function run(): Promise<number> {
         systemContent.includes('PASS_MAX_DAYS'),
       `system 长度=${systemContent.length}`
     )
+
+    // ---- 对话 + 命令历史持久化（3 天保留 / 打开恢复）----
+    {
+      const convDir = fs.mkdtempSync(path.join(os.tmpdir(), 'conv-store-'))
+      const conv = new ConversationStore(convDir)
+      const key = 'test-profile-1'
+      // 写入对话并按主机恢复
+      conv.saveConversation(key, [
+        { role: 'user', content: '磁盘满了怎么排查' },
+        { role: 'assistant', content: '使用 df -h 查看挂载点占用' }
+      ])
+      const loaded = conv.loadConversation(key)
+      assert(
+        '对话持久化可恢复',
+        !!loaded && loaded.messages.length === 2 && loaded.messages[1].content.includes('df -h'),
+        JSON.stringify(loaded)
+      )
+      // 命令历史：记录并更新状态
+      const cid = randomUUID()
+      conv.recordCommand(key, {
+        commandId: cid,
+        messageId: 'msg-x',
+        command: 'df -h',
+        risk: 'safe',
+        status: 'done',
+        executedAt: Date.now(),
+        result: { code: 0, stdout: 'Filesystem', stderr: '' }
+      })
+      const cmds = conv.loadCommandHistory(key)
+      assert('命令历史已记录', cmds.length === 1 && cmds[0].command === 'df -h' && cmds[0].status === 'done')
+      // 更新状态覆盖同 id
+      conv.recordCommand(key, {
+        commandId: cid,
+        messageId: 'msg-x',
+        command: 'df -h',
+        risk: 'safe',
+        status: 'done',
+        executedAt: Date.now(),
+        error: '覆盖'
+      })
+      const cmds2 = conv.loadCommandHistory(key)
+      assert('命令历史同 id 去重覆盖', cmds2.length === 1 && cmds2[0].error === '覆盖')
+      // 3 天过期清理：写入一条更早的历史，应被清理
+      conv.saveConversation(key + '-old', [
+        { role: 'user', content: '旧消息' },
+        { role: 'assistant', content: '旧回复' }
+      ])
+      const staleKey = key + '-old'
+      // 手工把 staleKey 的 updatedAt 改成过期，再触发一次有意写入以走 prune
+      const convFile = path.join(convDir, 'ai-conversations.json')
+      const raw = JSON.parse(fs.readFileSync(convFile, 'utf8'))
+      raw.conversations[staleKey].updatedAt = Date.now() - CONVERSATION_RETENTION_MS - 1000
+      fs.writeFileSync(convFile, JSON.stringify(raw))
+      const conv2 = new ConversationStore(convDir) // 重新加载以看到磁盘状态
+      const staleLoaded = conv2.loadConversation(staleKey) // 内部触发 prune
+      assert('3 天过期对话被清理', staleLoaded === null, `stale=${JSON.stringify(staleLoaded)}`)
+      // 未过期的仍在
+      const stillThere = conv2.loadConversation(key)
+      assert('3 天内对话仍保留', !!stillThere && stillThere.messages.length === 2, `key=${JSON.stringify(stillThere)}`)
+      // clear 清空
+      conv2.clear(key)
+      assert('clear 后对话清空', conv2.loadConversation(key) === null)
+      fs.rmSync(convDir, { recursive: true, force: true })
+    }
 
     // 只读命令(safe)无副作用，始终自动执行，不再显示批准按钮；删除/修改类需确认
     store.setAiConfig({

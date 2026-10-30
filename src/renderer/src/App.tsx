@@ -443,6 +443,7 @@ export default function App(): ReactElement {
               <div className={`pane-host ${tab === 'ai' ? '' : 'hidden'}`}>
                 <AIPane
                   sessionId={sessionId}
+                  profileKey={activeSession?.profileId ?? 'default'}
                   onToast={pushToast}
                   visible={tab === 'ai'}
                   configVersion={aiConfigVersion}

@@ -10,10 +10,12 @@ import type {
 } from '@shared/types'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { app } from 'electron'
 import { AiClient, estimateMessagesTokens, type ChatMessage, type ChatTool } from './client'
 import { matchAttackRules } from './attackRules'
 import { taintRequiresConfirmation } from './taint'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools, getReadOnlyToolCommand } from './tools'
+import { ConversationStore, commandEntryFromProposal } from './conversationStore'
 import { shellQuote } from '../ssh/connection'
 import type { Store } from '../core/store'
 import type { SessionManager } from '../ssh/manager'
@@ -997,6 +999,8 @@ export class AiOpsService extends EventEmitter {
   /** 检索 Provider 链（可用性缓存 + 失败退避）。key 变化时重建 provider，但链/冷却状态复用 */
   private searchManager: SearchManager | null = null
   private searchManagerKey = ''
+  /** 对话/命令历史持久化（未注入时按 userData 惰性自建） */
+  private lazyConversations: ConversationStore | null = null
 
   /** 每个会话允许的最大搜索次数 */
   private static readonly SEARCH_PER_SESSION_LIMIT = 10
@@ -1026,9 +1030,36 @@ export class AiOpsService extends EventEmitter {
 
   constructor(
     private readonly store: Store,
-    private readonly sessions: SessionManager
+    private readonly sessions: SessionManager,
+    private readonly conversations?: ConversationStore
   ) {
     super()
+    // 对话/命令历史持久化由调用方注入；缺省时按 userData 目录自建一处，保证可用。
+    // （测试可传入临时目录的 store 实例以避免污染真实数据。）
+  }
+
+  /** 稳定的主机持久化键：用 profile.id（WSL 会话亦同），而非连接期 sessionId */
+  private profileKeyOf(sessionId: string): string | null {
+    if (!this.sessions.has(sessionId)) return null
+    try {
+      return this.sessions.get(sessionId)?.profile?.id ?? null
+    } catch {
+      return null
+    }
+  }
+
+  private get conversationStore(): ConversationStore {
+    if (this.conversations) return this.conversations
+    if (!this.lazyConversations) {
+      let dir = process.env.TEMP || process.env.TMP || '/tmp'
+      try {
+        dir = app.getPath('userData')
+      } catch {
+        /* 非 Electron/测试环境：退回临时目录，仅保证不抛错 */
+      }
+      this.lazyConversations = new ConversationStore(dir)
+    }
+    return this.lazyConversations
   }
 
   /**
@@ -1089,6 +1120,7 @@ export class AiOpsService extends EventEmitter {
 
     // 先同步广播清单，保证界面先建卡片再收到执行结果
     this.emit('commands', [record])
+    this.recordCommandEntry(record, { status: record.autoApproved ? 'running' : 'pending' })
 
     if (record.autoApproved) {
       await this.executeProposal(record)
@@ -1117,6 +1149,7 @@ export class AiOpsService extends EventEmitter {
         attacks: proposal.attacks,
         rejected: true
       }
+      this.recordCommandEntry(proposal, { status: 'rejected' })
       this.emit('command-outcome', outcome)
       return outcome
     }
@@ -1177,6 +1210,7 @@ export class AiOpsService extends EventEmitter {
         }
       })
       const outcome: CommandOutcome = { ...proposal, result }
+      this.recordCommandEntry(proposal, { status: 'done', result })
       this.emit('command-outcome', outcome)
       return outcome
     } catch (err) {
@@ -1184,6 +1218,10 @@ export class AiOpsService extends EventEmitter {
         ...proposal,
         error: err instanceof Error ? err.message : String(err)
       }
+      this.recordCommandEntry(proposal, {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err)
+      })
       this.emit('command-outcome', outcome)
       return outcome
     } finally {
@@ -1212,10 +1250,44 @@ export class AiOpsService extends EventEmitter {
   private historyFor(sessionId: string): ChatMessage[] {
     let history = this.histories.get(sessionId)
     if (!history) {
-      history = []
+      history = this.loadPersistedHistory(sessionId)
       this.histories.set(sessionId, history)
     }
     return history
+  }
+
+  /** 从持久层加载该会话历史（3 天内保留，重启/重连后可恢复） */
+  private loadPersistedHistory(sessionId: string): ChatMessage[] {
+    const key = this.profileKeyOf(sessionId)
+    if (!key) return []
+    const saved = this.conversationStore.loadConversation(key)
+    if (!saved) return []
+    return saved.messages.map((m) => ({ role: m.role, content: m.content }))
+  }
+
+  /** 把当前会话历史落盘（每次对话轮次结束时调用） */
+  private persistHistory(sessionId: string): void {
+    const key = this.profileKeyOf(sessionId)
+    if (!key) return
+    const history = this.histories.get(sessionId)
+    if (!history || history.length === 0) {
+      this.conversationStore.clear(key)
+      return
+    }
+    this.conversationStore.saveConversation(key, history)
+  }
+
+  /** 写入一条命令历史（按主机键持久化，3 天内保留） */
+  private recordCommandEntry(
+    record: ProposedCommand,
+    extra?: { status?: string; result?: CommandResult; error?: string }
+  ): void {
+    const key = this.profileKeyOf(record.sessionId)
+    if (!key) return
+    this.conversationStore.recordCommand(
+      key,
+      commandEntryFromProposal(record, extra)
+    )
   }
 
   /** 读取远端系统信息，作为 AI 上下文 */
@@ -1414,6 +1486,7 @@ export class AiOpsService extends EventEmitter {
                         history.push({ role: 'user', content: userMessage })
                         history.push({ role: 'assistant', content: finalFull })
                         this.truncate(history)
+                        this.persistHistory(sessionId)
                         this.aborters.delete(sessionId)
                         options.onCommand(extractCommands(finalFull))
                         options.onDone(finalFull, metrics)
@@ -1439,6 +1512,7 @@ export class AiOpsService extends EventEmitter {
 
           history.push({ role: 'assistant', content: full })
           this.truncate(history)
+          this.persistHistory(sessionId)
           this.aborters.delete(sessionId)
           options.onDone(full, metrics)
         },
@@ -1523,6 +1597,7 @@ export class AiOpsService extends EventEmitter {
       onDone: (full, metrics) => {
         history.push({ role: 'assistant', content: full })
         this.truncate(history)
+        this.persistHistory(sessionId)
         this.aborters.delete(sessionId)
         // 追问回复中若又提出新命令，同样进入审批流程；
         // 但用户点过「停止」时，半截回复里的命令不再执行
@@ -1783,5 +1858,27 @@ ${report}
     this.histories.delete(sessionId)
     this.lastFeed.delete(sessionId)
     this.clearSearchBudget(sessionId)
+    // 一并清除持久化的对话与命令历史
+    const key = this.profileKeyOf(sessionId)
+    if (key) this.conversationStore.clear(key)
+  }
+
+  /**
+   * 打开应用后按主机（profileKey）加载已保留的对话与命令历史（3 天内）。
+   * - history：模型实际用于多轮上下文的对话消息；
+   * - commandHistory：命令执行记录（供审计 / 审批卡片还原）。
+   * 供渲染层在打开 AI 面板时自动拉取并定位到底部。
+   */
+  loadConversation(
+    profileKey: string
+  ): {
+    history: ChatMessage[]
+    commandHistory: ReturnType<ConversationStore['loadCommandHistory']>
+  } {
+    const saved = this.conversationStore.loadConversation(profileKey)
+    return {
+      history: saved ? saved.messages.map((m) => ({ role: m.role, content: m.content })) : [],
+      commandHistory: this.conversationStore.loadCommandHistory(profileKey)
+    }
   }
 }

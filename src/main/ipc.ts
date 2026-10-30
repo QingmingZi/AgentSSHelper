@@ -428,6 +428,11 @@ export function registerIpc(store: Store, sessions: SessionManager, ai: AiOpsSer
     return await ai.approveCommands(commandIds, approved)
   })
 
+  // 打开应用后按主机加载已保留的对话与命令历史（3 天内），渲染层定位到末尾
+  ipcMain.handle('ai:loadConversation', (_e, profileKey: string) => {
+    return ai.loadConversation(profileKey)
+  })
+
   ipcMain.handle('ai:stop', (_e, sessionId: string) => {
     ai.stop(sessionId)
     return true

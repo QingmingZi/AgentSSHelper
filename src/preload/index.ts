@@ -115,7 +115,10 @@ const api = {
     stop: (sessionId: string): Promise<boolean> => ipcRenderer.invoke('ai:stop', sessionId),
     /** 停止正在执行的命令（类似 Ctrl+C） */
     stopCommand: (commandId: string): Promise<boolean> =>
-      ipcRenderer.invoke('ai:stopCommand', commandId)
+      ipcRenderer.invoke('ai:stopCommand', commandId),
+    /** 打开应用后按主机加载已保留的对话与命令历史（3 天内） */
+    loadConversation: (profileKey: string): Promise<unknown> =>
+      ipcRenderer.invoke('ai:loadConversation', profileKey)
   },
 
   system: {
