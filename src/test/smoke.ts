@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { Store } from '../main/core/store'
 import { SessionManager } from '../main/ssh/manager'
 import { SystemUsageMonitor } from '../main/ssh/monitor'
-import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger, deriveSearchFilters, isSafeReadPath } from '../main/ai/ops'
+import { AiOpsService, classifyCommand, classifyRiskKind, extractCommands, readsSensitivePath, sanitizeUntrusted, initShellAst, isAstReady, analyzeAstDanger, deriveSearchFilters, isSafeReadPath, resolveToolCommand, classifyToolAction } from '../main/ai/ops'
 import { taintRequiresConfirmation, hasCommandBlockRemnants, isCleanForLlm } from '../main/ai/taint'
 import { loadAttackRules, matchAttackRules, isAttackRulesReady } from '../main/ai/attackRules'
 import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from '../main/ai/tools'
@@ -724,6 +724,22 @@ async function run(): Promise<number> {
       const fs = require('node:fs')
       assert('R4|shellQuote 压缩命令替换不落盘', !fs.existsSync('/tmp/inj_proof_smoke.txt'))
     }
+
+    // ---- 审计 R5 M-1：tool call 通道实际命令同套分级，非只读不自动执行 ----
+    assert('R5|resolve(固定工具) 得命令', /uname/.test((resolveToolCommand('kernel', '{}') ?? { command: '' }).command), JSON.stringify(resolveToolCommand('kernel', '{}')))
+    assert('R5|resolve(read_file) 解析为 cat', (resolveToolCommand('read_file', JSON.stringify({ path: '/etc/os-release' })) ?? { command: '' }).command.includes('cat --'), JSON.stringify(resolveToolCommand('read_file', JSON.stringify({ path: '/etc/os-release' }))))
+    assert('R5|resolve(未知工具) null', resolveToolCommand('nope', '{}') === null)
+    assert('R5|resolve(read_file 无参) null', resolveToolCommand('read_file', '{}') === null)
+    const g_osrel = classifyToolAction('read_file', JSON.stringify({ path: '/etc/os-release' }), false)
+    assert('R5|read_file 普通文件→safe 自动', !!g_osrel && g_osrel.risk === 'safe' && g_osrel.autoApproved === true, JSON.stringify(g_osrel))
+    const g_shadow = classifyToolAction('read_file', JSON.stringify({ path: '/etc/shadow' }), false)
+    assert('R5|read_file 敏感路径→risky 不自动', !!g_shadow && g_shadow.risk === 'risky' && g_shadow.autoApproved === false, JSON.stringify(g_shadow))
+    const g_inject = classifyToolAction('read_file', JSON.stringify({ path: '$(id)' }), false)
+    assert('R5|read_file RCE形路径→不自动', !g_inject || g_inject.autoApproved !== true, JSON.stringify(g_inject))
+    const g_kernel = classifyToolAction('kernel', '{}', false)
+    assert('R5|固定只读工具→自动', !!g_kernel && g_kernel.autoApproved === true, JSON.stringify(g_kernel))
+    const g_unknown = classifyToolAction('nonexistent', '{}', false)
+    assert('R5|未知工具→null 不执行', g_unknown === null)
 
     // --------------------------------------------------- 命令提案解析
     const reply = `先看下磁盘。\n:::command\ndf -h\n:::\n再看看内存。\n:::command\nfree -m\n:::`

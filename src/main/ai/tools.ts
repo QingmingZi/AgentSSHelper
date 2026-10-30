@@ -77,6 +77,16 @@ export function listReadOnlyTools(): Array<{ name: string; description: string }
   return [...HOST_INFO_CMDS, ...DIAGNOSTIC_CMDS].map((t) => ({ name: t.name, description: t.description }))
 }
 
+/**
+ * 取固定只读工具实际会执行的命令文本（供分级闸门对 tool call 通道做与命令通道
+ * 一致的 classify；审计 R5 M-1：确保 tool call 通道的实际命令也过分级）。
+ * 未知工具返回 null。
+ */
+export function getReadOnlyToolCommand(name: string): string | null {
+  const hit = [...HOST_INFO_CMDS, ...DIAGNOSTIC_CMDS].find((t) => t.name === name)
+  return hit ? hit.buildCommand() : null
+}
+
 interface ExecFn {
   (command: string, options?: { timeout?: number }): Promise<CommandResult>
 }

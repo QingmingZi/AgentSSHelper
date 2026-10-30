@@ -13,7 +13,7 @@ import { EventEmitter } from 'node:events'
 import { AiClient, estimateMessagesTokens, type ChatMessage, type ChatTool } from './client'
 import { matchAttackRules } from './attackRules'
 import { taintRequiresConfirmation } from './taint'
-import { runReadOnlyTool, executeReadFile, listReadOnlyTools } from './tools'
+import { runReadOnlyTool, executeReadFile, listReadOnlyTools, getReadOnlyToolCommand } from './tools'
 import { shellQuote } from '../ssh/connection'
 import type { Store } from '../core/store'
 import type { SessionManager } from '../ssh/manager'
@@ -634,6 +634,59 @@ export function isSafeReadPath(pathArg: string): boolean {
   // 拒绝目录穿越（路径段两端的裸 `..`，含 `a/../b`）
   if (/(^|\/)\.\.(\/|$)/.test(p)) return false
   return true
+}
+
+/**
+ * 把一次 tool call 解析成「会真实执行的命令文本」。
+ * - 固定只读工具：其命令文本来自白名单定义（tools.ts），不可注入；
+ * - read_file：解析为 cat 读取该路径（用到 shellQuote，避免把模型原话拼进 shell）。
+ * 返回 null 表示无法解析（参数缺失 / 未知工具）。
+ * 统一交由 classifyToolAction 核对是否可免确认执行（审计 R5 M-1）。
+ */
+export function resolveToolCommand(
+  name: string,
+  rawArgs: string
+): { command: string } | null {
+  let args: Record<string, string> = {}
+  if (rawArgs && rawArgs.trim()) {
+    try {
+      const parsed = JSON.parse(rawArgs) as Record<string, string>
+      if (parsed && typeof parsed === 'object') args = parsed
+    } catch {
+      args = {}
+    }
+  }
+  if (name === 'read_file') {
+    const pathArg = (args.path ?? args.file) as string | undefined
+    // 路径须通过白名单预检，否则视为参数非法（执行层同样拒绝）——让分级闸门与执行层
+    // 同口径，杜绝 classify 判 safe、exec 却拒绝的错位（审计 R5 M-1/M-3）。
+    if (!pathArg || !isSafeReadPath(pathArg)) return null
+    return { command: `cat -- ${shellQuote(pathArg)}` }
+  }
+  const baked = getReadOnlyToolCommand(name)
+  if (!baked) return null
+  return { command: baked }
+}
+
+/**
+ * tool call 通道的等效分级（审计 R5 M-1）：与命令通道（dispatchCommands）用同一套
+ * 规则核对其实际命令 —— classify + 敏感路径升级 + AST 只加严 + 污点闸门。
+ * 返回是否允许免确认自动执行；凡非自动一律应转入审批通道，杜绝"名字在白名单就免审批"。
+ */
+export function classifyToolAction(
+  name: string,
+  rawArgs: string,
+  autoApproveModifyCommands: boolean
+): { command: string; risk: CommandRisk; autoApproved: boolean } | null {
+  const resolved = resolveToolCommand(name, rawArgs)
+  if (!resolved) return null
+  let risk = classifyCommand(resolved.command)
+  if (risk === 'safe' && readsSensitivePath(resolved.command)) risk = 'risky'
+  if (risk === 'safe' && isAstReady() && analyzeAstDanger(resolved.command).length > 0) risk = 'risky'
+  if (risk === 'safe' && taintRequiresConfirmation(resolved.command)) risk = 'risky'
+  // 与命令通道 canAutoApprove 同口径：safe 恒自动；modify/delete 取决于开关；risky 永不
+  const autoApproved = risk === 'safe' || ((risk === 'modify' || risk === 'delete') && autoApproveModifyCommands)
+  return { command: resolved.command, risk, autoApproved }
 }
 
 /** 命令块的各种结束标记：标准 `:::`，或模型偶尔自学的 EOF / EOT */
@@ -1317,53 +1370,70 @@ export class AiOpsService extends EventEmitter {
           const aborted = controller.signal.aborted
           if (!aborted) options.onCommand(extractCommands(full))
 
-          // 原生 function calling：模型请求调用只读工具 → 执行并回传一档结果
+          // 原生 function calling：模型请求调用只读工具。
+          // 审计 R5 M-1：执行前先对其"实际命令"做与命令通道同一套分级（classify +
+          // 敏感/AST/污点升级）；凡不可免确认自动执行的 tool 一律不执行，转人工确认，
+          // 杜绝"工具名在白名单就免审批"的并行可信路径。
           const toolName = toolCallAcc.name
           if (!aborted && toolName && this.isKnownReadOnlyTool(toolName)) {
-            try {
-              const toolResult = await this.runNativeTool(sessionId, toolName, toolCallAcc.arguments)
-              options.onToolResult?.(toolResult)
-              // 第二档：把工具结果作为 user/tool 内容追加，让模型基于真实只读信息给出最终回答
-              const followUp = [
-                ...requestMessages,
-                { role: 'assistant' as const, content: '' },
-                {
-                  role: 'user' as const,
-                  content:
-                    toolResult.output != null
-                      ? `<tool_result name="${toolName}">\n${sanitizeUntrusted(toolResult.output, 8000)}\n</tool_result>` +
-                        `\n请基于以上只读工具的真实输出继续回答，并以命令块形式给出后续必要命令。`
-                      : `<tool_result name="${toolName}">\n[执行失败] ${toolResult.error ?? '无输出'}\n</tool_result>`
-                }
-              ]
-              await new Promise<void>((resolve) => {
-                void client.chat(
-                  followUp,
-                  {
-                    onDelta: options.onDelta,
-                    onDone: (finalFull) => {
-                      history.push({ role: 'user', content: userMessage })
-                      history.push({ role: 'assistant', content: finalFull })
-                      this.truncate(history)
-                      this.aborters.delete(sessionId)
-                      options.onCommand(extractCommands(finalFull))
-                      options.onDone(finalFull, metrics)
-                      resolve()
-                    },
-                    onError: (err) => {
-                      this.aborters.delete(sessionId)
-                      options.onError(err)
-                      resolve()
-                    }
-                  },
-                  controller.signal
-                )
+            // 审计 R5 M-1：执行前先对"实际命令"做与命令通道同一套分级（classify +
+            // 敏感/AST/污点升级）；凡不可免确认自动执行的 tool 一律不执行、不入只读
+            // 通道，转人工确认语义，杜绝"工具名在白名单就免审批"。
+            const gate = classifyToolAction(toolName, toolCallAcc.arguments, config.autoApproveModifyCommands)
+            if (!gate || !gate.autoApproved) {
+              options.onToolResult?.({
+                name: toolName,
+                arguments: toolCallAcc.arguments,
+                error: gate
+                  ? `需人工确认（风险=${RISK_LABELS[gate.risk]}），未自动执行`
+                  : '工具参数无法解析，未自动执行'
               })
-              return
-            } catch (err) {
-              options.onError(err instanceof Error ? err : new Error(String(err)))
-              this.aborters.delete(sessionId)
-              return
+            } else {
+              try {
+                const toolResult = await this.runNativeTool(sessionId, toolName, toolCallAcc.arguments)
+                options.onToolResult?.(toolResult)
+                // 第二档：把工具结果作为 user/tool 内容追加，让模型基于真实只读信息给出最终回答
+                const followUp = [
+                  ...requestMessages,
+                  { role: 'assistant' as const, content: '' },
+                  {
+                    role: 'user' as const,
+                    content:
+                      toolResult.output != null
+                        ? `<tool_result name="${toolName}">\n${sanitizeUntrusted(toolResult.output, 8000)}\n</tool_result>` +
+                          `\n请基于以上只读工具的真实输出继续回答，并以命令块形式给出后续必要命令。`
+                        : `<tool_result name="${toolName}">\n[执行失败] ${toolResult.error ?? '无输出'}\n</tool_result>`
+                  }
+                ]
+                await new Promise<void>((resolve) => {
+                  void client.chat(
+                    followUp,
+                    {
+                      onDelta: options.onDelta,
+                      onDone: (finalFull) => {
+                        history.push({ role: 'user', content: userMessage })
+                        history.push({ role: 'assistant', content: finalFull })
+                        this.truncate(history)
+                        this.aborters.delete(sessionId)
+                        options.onCommand(extractCommands(finalFull))
+                        options.onDone(finalFull, metrics)
+                        resolve()
+                      },
+                      onError: (err) => {
+                        this.aborters.delete(sessionId)
+                        options.onError(err)
+                        resolve()
+                      }
+                    },
+                    controller.signal
+                  )
+                })
+                return
+              } catch (err) {
+                options.onError(err instanceof Error ? err : new Error(String(err)))
+                this.aborters.delete(sessionId)
+                return
+              }
             }
           }
 
